@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { emptyLevel } from '../level/types';
-import { buildCarMesh, syncCarMesh } from './carMesh';
+import { VEHICLE_KINDS } from '../sim/vehicles';
+import { buildVehicleMesh, syncVehicleMesh } from './vehicleMesh';
 import { buildLevelGroup } from './levelMeshes';
 
 function kinds(group: {
@@ -58,10 +59,19 @@ describe('level meshes', () => {
   });
 });
 
-describe('car mesh', () => {
+describe('vehicle meshes', () => {
+  it('every kind has named rigid parts', () => {
+    for (const kind of VEHICLE_KINDS) {
+      const vehicle = buildVehicleMesh(kind);
+      expect(vehicle.getObjectByName('chassis'), kind).toBeDefined();
+      expect(vehicle.getObjectByName('wheel-0'), kind).toBeDefined();
+      expect(vehicle.getObjectByName('wheel-1'), kind).toBeDefined();
+    }
+  });
+
   it('has named rigid parts and follows physics poses', () => {
-    const car = buildCarMesh();
-    syncCarMesh(
+    const car = buildVehicleMesh('car');
+    syncVehicleMesh(
       car,
       { x: 5, y: 2, angle: 0.3 },
       [

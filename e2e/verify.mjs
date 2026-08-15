@@ -38,6 +38,12 @@ const landingLevel = {
   finish: { x: 45, y: 0.8 },
 };
 
+const runwayLevel = {
+  ...flatLevel,
+  strokes: [{ points: [[-20, 0], [400, 0]] }],
+  finish: { x: 390, y: 0.8 },
+};
+
 let failures = 0;
 const pass = (message) => console.log(`PASS: ${message}`);
 const fail = (message) => {
@@ -236,6 +242,62 @@ try {
     await page.keyboard.up('d');
   }
   pass('D key rocked an overturned car back onto its wheels');
+
+  // Vehicles: the motorcycle should beat the car on the same flat course.
+  const raceTimeFor = async (kind) => {
+    await page.evaluate(() => window.__game.setInput({}));
+    await page.evaluate(() => window.__game.setMode('edit'));
+    const loaded = await page.evaluate(
+      (level) => window.__game.loadLevel(level),
+      flatLevel,
+    );
+    if (!loaded) throw new Error(`debug handle rejected the ${kind} race level`);
+    const switched = await page.evaluate((k) => window.__game.setVehicle(k), kind);
+    if (!switched) throw new Error(`could not select the ${kind}`);
+    await page.evaluate(() => window.__game.setMode('play'));
+    await page.evaluate(() => window.__game.setInput({ gas: true }));
+    await page.waitForFunction(
+      () => window.__game.getRunState().phase === 'finished',
+      null,
+      { timeout: 25_000 },
+    );
+    await page.evaluate(() => window.__game.setInput({}));
+    return page.evaluate(() => window.__game.getRunState().timeMs);
+  };
+  const carRaceTime = await raceTimeFor('car');
+  const motorcycleRaceTime = await raceTimeFor('motorcycle');
+  motorcycleRaceTime < carRaceTime
+    ? pass(
+        `motorcycle (${(motorcycleRaceTime / 1000).toFixed(2)}s) beat the car (${(carRaceTime / 1000).toFixed(2)}s)`,
+      )
+    : fail(
+        `motorcycle (${motorcycleRaceTime}ms) did not beat the car (${carRaceTime}ms)`,
+      );
+
+  // Plane: takes off from a long runway under sustained gas alone.
+  await page.evaluate(() => window.__game.setMode('edit'));
+  const loadedRunway = await page.evaluate(
+    (level) => window.__game.loadLevel(level),
+    runwayLevel,
+  );
+  if (!loadedRunway) throw new Error('debug handle rejected the runway level');
+  const pickedPlane = await page.evaluate(() => window.__game.setVehicle('plane'));
+  if (!pickedPlane) throw new Error('could not select the plane');
+  await page.evaluate(() => window.__game.setMode('play'));
+  await page.evaluate(() => window.__game.setInput({ gas: true }));
+  let peakAltitude = 0;
+  for (let sample = 0; sample < 60; sample += 1) {
+    await page.waitForTimeout(100);
+    const altitude = await page.evaluate(
+      () => window.__game.getCarPose()?.y ?? 0,
+    );
+    peakAltitude = Math.max(peakAltitude, altitude);
+  }
+  await page.evaluate(() => window.__game.setInput({}));
+  await page.evaluate(() => window.__game.setMode('edit'));
+  peakAltitude > 4
+    ? pass(`plane took off and climbed to y=${peakAltitude.toFixed(1)}`)
+    : fail(`plane never took off (peak y=${peakAltitude.toFixed(1)})`);
 
   if (pageErrors.length === 0) pass('browser reported no page or console errors');
   else fail(`browser errors: ${pageErrors.join(' | ')}`);

@@ -1,7 +1,9 @@
 import type { Tool } from '../editor/core';
+import type { VehicleKind } from '../sim/vehicles';
 
 export type HudCallbacks = {
   onSelectTool(tool: Tool): void;
+  onSelectVehicle(kind: VehicleKind): void;
   onTogglePlay(): void;
   onRestart(): void;
   onUndo(): void;
@@ -14,12 +16,19 @@ export type HudCallbacks = {
 export type Hud = {
   setMode(mode: 'edit' | 'play'): void;
   setTool(tool: Tool): void;
+  setVehicle(kind: VehicleKind): void;
   setTimer(milliseconds: number | null): void;
   showResults(milliseconds: number, bestMilliseconds: number | null): void;
   hideResults(): void;
   toast(message: string): void;
   setLevelList(names: string[]): void;
 };
+
+const VEHICLES: { kind: VehicleKind; icon: string; label: string }[] = [
+  { kind: 'car', icon: '🚗', label: 'Car' },
+  { kind: 'motorcycle', icon: '🏍', label: 'Moto' },
+  { kind: 'plane', icon: '✈', label: 'Plane' },
+];
 
 const TOOLS: { tool: Tool; icon: string; label: string; key: string }[] = [
   { tool: 'draw', icon: '✦', label: 'Track', key: '1' },
@@ -91,6 +100,18 @@ export function createHud(host: HTMLElement, callbacks: HudCallbacks): Hud {
     toolButtons.set(tool.tool, toolButton);
     toolbelt.appendChild(toolButton);
   }
+  const beltDivider = document.createElement('div');
+  beltDivider.className = 'belt-divider';
+  toolbelt.appendChild(beltDivider);
+  const vehicleButtons = new Map<VehicleKind, HTMLButtonElement>();
+  for (const vehicle of VEHICLES) {
+    const vehicleButton = button('', 'tool-button vehicle-button');
+    vehicleButton.innerHTML = `<span class="tool-icon">${vehicle.icon}</span><span class="tool-label">${vehicle.label}</span>`;
+    vehicleButton.title = `Race the ${vehicle.label.toLowerCase()}`;
+    vehicleButton.onclick = () => callbacks.onSelectVehicle(vehicle.kind);
+    vehicleButtons.set(vehicle.kind, vehicleButton);
+    toolbelt.appendChild(vehicleButton);
+  }
   host.appendChild(toolbelt);
 
   const levelPanel = document.createElement('section');
@@ -158,17 +179,25 @@ export function createHud(host: HTMLElement, callbacks: HudCallbacks): Hud {
       for (const toolButton of toolButtons.values()) {
         toolButton.disabled = mode === 'play';
       }
+      for (const vehicleButton of vehicleButtons.values()) {
+        vehicleButton.disabled = mode === 'play';
+      }
       undoButton.disabled = redoButton.disabled = levelsButton.disabled = mode === 'play';
       if (mode === 'play') levelPanel.classList.add('hidden');
       hint.textContent =
         mode === 'edit'
           ? 'Drag to build · Space + drag to pan · Scroll to zoom · Tab to race'
-          : 'W / → gas · S / ← reverse · A / D rock · R restart · Tab edit';
+          : 'W / → gas · S / ← reverse · A / D tilt · R restart · Tab edit';
       if (mode === 'edit') hud.hideResults();
     },
     setTool(tool) {
       for (const [name, toolButton] of toolButtons) {
         toolButton.classList.toggle('active', name === tool);
+      }
+    },
+    setVehicle(kind) {
+      for (const [name, vehicleButton] of vehicleButtons) {
+        vehicleButton.classList.toggle('active', name === kind);
       }
     },
     setTimer(milliseconds) {

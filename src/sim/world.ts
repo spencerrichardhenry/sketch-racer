@@ -4,7 +4,13 @@ import RAPIER, {
 } from '@dimforge/rapier2d-compat';
 import { smoothStroke } from '../level/smooth';
 import type { LevelData, Paddle, Vec2 } from '../level/types';
-import { type Car, applyCarInput, createCar, spawnPoses } from './car';
+import {
+  type Vehicle,
+  type VehicleKind,
+  applyVehicleInput,
+  createVehicle,
+  spawnPoses,
+} from './vehicles';
 import { paddlePose } from './paddles';
 import type { Input } from './run';
 import * as T from './tuning';
@@ -68,9 +74,10 @@ function nearestTerrainTangent(
 export class SimWorld {
   timeS = 0;
   finished = false;
+  kind: VehicleKind = 'car';
 
   private world!: RAPIER.World;
-  private car!: Car;
+  private car!: Vehicle;
   private level!: LevelData;
   private boosts: BoostRuntime[] = [];
   private trampolines: TrampolineRuntime[] = [];
@@ -82,9 +89,13 @@ export class SimWorld {
   private finishSensor!: Collider;
   private freed = false;
 
-  static async create(level: LevelData): Promise<SimWorld> {
+  static async create(
+    level: LevelData,
+    kind: VehicleKind = 'car',
+  ): Promise<SimWorld> {
     await initRapier();
     const simulation = new SimWorld();
+    simulation.kind = kind;
     simulation.build(level);
     return simulation;
   }
@@ -168,7 +179,7 @@ export class SimWorld {
         .setSensor(true),
       fixedBody,
     );
-    this.car = createCar(this.world, level.start);
+    this.car = createVehicle(this.world, level.start, this.kind);
   }
 
   step(input: Input, deltaSeconds = T.PHYS_DT): void {
@@ -179,7 +190,7 @@ export class SimWorld {
       paddle.body.setNextKinematicRotation(pose.angle);
     }
 
-    applyCarInput(this.car, input);
+    applyVehicleInput(this.car, input);
     const speedBeforeStep = [this.car.chassis, ...this.car.wheels].map(
       (body) => {
         const velocity = body.linvel();
@@ -221,6 +232,7 @@ export class SimWorld {
     deltaSeconds: number,
     speedBeforeStep: number[],
   ): void {
+    if (!this.car.spec.terrainAssist) return;
     const terrain = this.terrains.find(({ collider }) =>
       this.carTouches(collider),
     );
@@ -359,7 +371,7 @@ export class SimWorld {
   }
 
   private resetCar(): void {
-    const poses = spawnPoses(this.level.start);
+    const poses = spawnPoses(this.level.start, this.kind);
     this.car.chassis.setTranslation(poses.chassis, true);
     this.car.chassis.setRotation(this.level.start.angle, true);
     this.car.chassis.setLinvel({ x: 0, y: 0 }, true);

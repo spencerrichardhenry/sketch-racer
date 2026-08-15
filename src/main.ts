@@ -10,6 +10,7 @@ import {
 import * as store from './level/store';
 import { createScene } from './render/scene';
 import type { RunState } from './sim/run';
+import type { VehicleKind } from './sim/vehicles';
 import { initRapier } from './sim/world';
 import { createHud } from './ui/hud';
 
@@ -26,6 +27,8 @@ declare global {
         leanLeft?: boolean;
         leanRight?: boolean;
       }): void;
+      setVehicle(kind: VehicleKind): boolean;
+      getVehicle(): VehicleKind;
       getCarPose(): { x: number; y: number; angle: number } | null;
       getCarVelocity(): { x: number; y: number } | null;
       getRunState(): RunState;
@@ -112,6 +115,9 @@ async function boot(): Promise<void> {
       game.editor.tool = tool;
       hud.setTool(tool);
     },
+    onSelectVehicle: (kind: VehicleKind) => {
+      if (game.setVehicle(kind)) hud.setVehicle(kind);
+    },
     onTogglePlay: () => void toggleMode(),
     onRestart: () => {
       hud.hideResults();
@@ -157,6 +163,7 @@ async function boot(): Promise<void> {
 
   hud.setMode('edit');
   hud.setTool('draw');
+  hud.setVehicle(game.vehicleKind);
   hud.setLevelList(store.listLevels());
   hud.setTimer(0);
 
@@ -243,6 +250,12 @@ async function boot(): Promise<void> {
       return true;
     },
     setMode: (mode) => game.setMode(mode),
+    setVehicle: (kind: VehicleKind) => {
+      const changed = game.setVehicle(kind);
+      if (changed) hud.setVehicle(kind);
+      return changed;
+    },
+    getVehicle: () => game.vehicleKind,
     setInput: (input) => {
       game.input = {
         gas: Boolean(input.gas),

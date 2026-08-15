@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { EditorCore } from './editor/core';
 import { advance } from './game/loop';
 import { type LevelData, cloneLevel } from './level/types';
-import { buildCarMesh, syncCarMesh } from './render/carMesh';
+import { buildVehicleMesh, syncVehicleMesh } from './render/vehicleMesh';
 import {
   buildLevelGroup,
   buildStrokePreview,
@@ -22,6 +22,7 @@ import {
   tickRun,
 } from './sim/run';
 import * as T from './sim/tuning';
+import type { VehicleKind } from './sim/vehicles';
 import { SimWorld } from './sim/world';
 
 export type Mode = 'edit' | 'play';
@@ -39,12 +40,13 @@ export class Game {
   input: Input = { gas: false, brake: false };
   run: RunState = createRun();
   sim: SimWorld | null = null;
+  vehicleKind: VehicleKind = 'car';
 
   private readonly context: SceneCtx;
   private readonly events: GameEvents;
   private levelGroup: THREE.Group;
   private previewGroup: THREE.Group | null = null;
-  private readonly carGroup: THREE.Group;
+  private carGroup: THREE.Group;
   private accumulatorSeconds = 0;
   private previousFrameMs: number | null = null;
   private switching = false;
@@ -57,9 +59,21 @@ export class Game {
     this.levelGroup = buildLevelGroup(this.level);
     this.context.scene.add(this.levelGroup);
     fitEditCamera(this.context.editCam, this.level);
-    this.carGroup = buildCarMesh();
+    this.carGroup = buildVehicleMesh(this.vehicleKind);
     this.carGroup.visible = false;
     this.context.scene.add(this.carGroup);
+  }
+
+  setVehicle(kind: VehicleKind): boolean {
+    if (this.mode !== 'edit' || this.switching) return false;
+    if (kind === this.vehicleKind) return true;
+    this.vehicleKind = kind;
+    this.context.scene.remove(this.carGroup);
+    disposeObject(this.carGroup);
+    this.carGroup = buildVehicleMesh(kind);
+    this.carGroup.visible = false;
+    this.context.scene.add(this.carGroup);
+    return true;
   }
 
   get level(): LevelData {
@@ -117,14 +131,14 @@ export class Game {
       this.input = { gas: false, brake: false };
       this.previousFrameMs = null;
       if (mode === 'play') {
-        this.sim = await SimWorld.create(this.level);
+        this.sim = await SimWorld.create(this.level, this.vehicleKind);
         this.run = createRun();
         this.accumulatorSeconds = 0;
         this.killLine = killY(this.level);
         this.carGroup.visible = true;
         const pose = this.sim.carPose();
         this.context.playCam.position.set(pose.x - 5.5, pose.y + 4.2, 15.5);
-        syncCarMesh(this.carGroup, pose, this.sim.wheelPoses());
+        syncVehicleMesh(this.carGroup, pose, this.sim.wheelPoses());
         this.showEditorAnnotations(false);
       } else {
         this.sim?.free();
@@ -172,7 +186,7 @@ export class Game {
       }
 
       const carPose = this.sim.carPose();
-      syncCarMesh(this.carGroup, carPose, this.sim.wheelPoses());
+      syncVehicleMesh(this.carGroup, carPose, this.sim.wheelPoses());
       this.sim.paddlePoses().forEach((pose, index) => {
         const paddle = this.levelGroup.getObjectByName(`paddle-${index}`);
         if (!paddle) return;

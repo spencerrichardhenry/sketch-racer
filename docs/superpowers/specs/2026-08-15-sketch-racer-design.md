@@ -104,7 +104,7 @@ src/
 ```
 
 - Physics bodies and meshes are both derived from `LevelData`; editor edits only touch `LevelData`.
-- `window.__game` exposes: `getState()`, `loadLevel(json)`, `setMode(mode)`, `setInput({gas, brake, tiltBack, tiltFwd})`, `setVehicle(kind)` / `getVehicle()` (edit mode only), `getCarPose()`, `getCarVelocity()`, `getRunState()` — for e2e and debugging.
+- `window.__game` exposes: `getState()`, `loadLevel(json)`, `setMode(mode)`, `setInput({gas, brake, leanLeft, leanRight})`, `setVehicle(kind)` / `getVehicle()` (edit mode only), `getCarPose()`, `getCarVelocity()`, `getRunState()` — for e2e and debugging.
 
 ## Error handling
 
