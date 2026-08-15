@@ -17,6 +17,7 @@ Inspiration: Line Rider's freehand track drawing, but player-driven like Hill Cl
 - **Persistence**: localStorage save/load with named levels.
 - **Physics**: Rapier2D (`@dimforge/rapier2d-compat`, WASM) — car via motorized revolute joints; kinematic bodies for paddles.
 - **Stack**: Vite + TypeScript + Three.js + Vitest, `window.__game` debug handles, Playwright-driven e2e verify script (same conventions as wildtag/funnel-crm).
+- **Vehicles** (added 2026-08-15 after initial approval): three selectable vehicles — car, motorcycle, plane — with distinct physics. Selection is a player choice made in the UI, NOT stored in LevelData.
 
 ## Modes
 
@@ -40,10 +41,20 @@ Toggle via a Play/Edit button and `Tab`. Entering Play builds the physics world 
 
 Editor also has: **eraser** (click/drag removes strokes or gadgets), **undo/redo** (level-data snapshots), tool selection via toolbar + number keys.
 
+## Vehicles
+
+Three vehicles, picked from the toolbar in edit mode (default: car). All share one physical contract — a chassis rigid body (cuboid) + 2 wheel colliders (balls) on revolute joints — so `SimWorld`, rendering, and respawn handle them uniformly. Differences come from a per-kind parameter table (`VEHICLE_SPECS`) and per-kind input application:
+
+- **Car** — balanced baseline: heavy chassis (density 2), motorized wheels, moderate torque, air tilt only when airborne.
+- **Motorcycle** — roughly half the car's mass, shorter wheelbase, smaller/grippier wheels, higher motor speed: accelerates much more aggressively and flips more easily.
+- **Plane** — light, long fuselage, small unpowered low-friction wheels (rolls on a runway). Gas applies thrust along the facing direction (brake = weak reverse thrust). Aerodynamics: lift proportional to forward-speed² along body-up plus quadratic drag, so it takes off at speed and glides when the engine cuts; tilt (pitch) authority is always active, with angular damping for stability.
+
+Behavioral acceptance criteria (unit-tested): the motorcycle out-accelerates the car by ≥1.3× distance over 1.5 s of full gas; the plane takes off from a flat runway under sustained gas; with the engine cut at altitude the plane's glide ratio (Δx / |Δy|) exceeds 1.5. E2e: the motorcycle beats the car's time on the same flat course.
+
 ## Driving model
 
-- Car = chassis rigid body (cuboid) + 2 wheel colliders (balls) attached with revolute joints with motors.
-- `W`/`→`: motor forward (gas). `S`/`←`: motor reverse (brake/reverse). Same keys apply chassis torque when airborne (air tilt). `R`: restart run.
+- Vehicle = chassis rigid body (cuboid) + 2 wheel colliders (balls) attached with revolute joints; wheels are motorized for car/motorcycle, free-rolling for the plane (which uses thrust instead).
+- `W`/`→`: gas (motor or thrust). `S`/`←`: brake/reverse. `A`/`D`: tilt back/forward — airborne only for car/motorcycle, always for the plane (pitch). `R`: restart run. Tilt input does not start the run timer; gas/brake do.
 - Fixed 60 Hz physics timestep, accumulator loop, render interpolation.
 - Timer starts on first driving input, stops at finish sensor overlap. Result overlay shows time + best time for the level.
 - Falling below the level's lowest geometry (minus margin) auto-respawns at Start (timer keeps running — falling is a penalty, restart with `R` to reset the clock).
@@ -81,19 +92,19 @@ src/
     tools/*.ts       // draw, boost, trampoline, paddle, start/finish, eraser
   sim/
     world.ts         // LevelData -> Rapier world (colliders, sensors)
-    car.ts           // chassis + wheels + joints, input -> motors/torque
+    vehicles.ts      // VEHICLE_SPECS table, createVehicle, per-kind input/aero
     paddles.ts       // kinematic oscillation — pure math, unit-tested
     run.ts           // timer, finish detection, respawn rules
   render/
     scene.ts         // renderer, cameras (ortho edit / perspective chase), lights
     levelMeshes.ts   // LevelData -> extruded meshes (rebuilt on edit)
-    carMesh.ts       // box chassis + cylinder wheels, synced from sim
+    vehicleMesh.ts   // per-kind chassis + cylinder wheels, synced from sim
   ui/
     hud.ts           // toolbar, timer, results overlay, save/load panel
 ```
 
 - Physics bodies and meshes are both derived from `LevelData`; editor edits only touch `LevelData`.
-- `window.__game` exposes: `getState()`, `loadLevel(json)`, `setMode(mode)`, `setInput({gas, brake})`, `getCarPose()`, `getRunState()` — for e2e and debugging.
+- `window.__game` exposes: `getState()`, `loadLevel(json)`, `setMode(mode)`, `setInput({gas, brake, tiltBack, tiltFwd})`, `setVehicle(kind)` / `getVehicle()` (edit mode only), `getCarPose()`, `getCarVelocity()`, `getRunState()` — for e2e and debugging.
 
 ## Error handling
 
@@ -103,9 +114,9 @@ src/
 
 ## Testing
 
-- **Unit (Vitest)**: RDP simplification, LevelData serialization/validation, paddle oscillation math, run-state rules (timer start/stop, respawn conditions).
-- **e2e (Playwright script, wildtag-style `verify` script)**: launch dev server, inject a known simple level via `__game.loadLevel`, enter play mode, hold gas via `__game.setInput`, assert the car reaches finish and the results overlay shows a time. Second scenario: boost pad measurably increases car velocity.
+- **Unit (Vitest)**: RDP simplification, LevelData serialization/validation, paddle oscillation math, run-state rules (timer start/stop, respawn conditions), vehicle behavior differentiation (motorcycle acceleration, plane takeoff and glide ratio — see Vehicles section).
+- **e2e (Playwright script, wildtag-style `verify` script)**: launch dev server, inject a known simple level via `__game.loadLevel`, enter play mode, hold gas via `__game.setInput`, assert the car reaches finish and the results overlay shows a time. Second scenario: boost pad measurably increases car velocity. Third scenario: motorcycle finishes the same flat course faster than the car (sim-time comparison via `__game.setVehicle`).
 
 ## Out of scope for v1 (YAGNI)
 
-Level sharing/export, sounds, mobile/touch controls, multiple cars/skins, paddle period editing, checkpoints, ghost replays, camera settings.
+Level sharing/export, sounds, mobile/touch controls, vehicle skins/customization, per-level vehicle restrictions, paddle period editing, checkpoints, ghost replays, camera settings.
