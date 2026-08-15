@@ -1,7 +1,12 @@
 import type { LevelData } from '../level/types';
 import { KILL_MARGIN } from './tuning';
 
-export type Input = { gas: boolean; brake: boolean };
+export type Input = {
+  gas: boolean;
+  brake: boolean;
+  leanLeft?: boolean;
+  leanRight?: boolean;
+};
 export type RunPhase = 'idle' | 'running' | 'finished';
 export type RunState = { phase: RunPhase; timeMs: number };
 
@@ -16,7 +21,7 @@ export function tickRun(
 ): RunState {
   if (state.phase === 'finished') return state;
   if (state.phase === 'idle') {
-    return input.gas || input.brake
+    return input.gas || input.brake || input.leanLeft || input.leanRight
       ? { phase: 'running', timeMs: deltaMs }
       : state;
   }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as THREE from 'three';
 import { emptyLevel } from '../level/types';
 import { buildCarMesh, syncCarMesh } from './carMesh';
 import { buildLevelGroup } from './levelMeshes';
@@ -24,7 +25,7 @@ describe('level meshes', () => {
     level.trampolines.push({ x: 2, y: 0, angle: 0, length: 3 });
     level.paddles.push({ a: [3, 0], b: [3, 4], width: 2.5 });
     const counts = kinds(buildLevelGroup(level));
-    expect(counts.stroke).toBe(3);
+    expect(counts.stroke).toBe(2);
     expect(counts.boost).toBe(1);
     expect(counts.trampoline).toBe(1);
     expect(counts.paddle).toBe(1);
@@ -45,6 +46,15 @@ describe('level meshes', () => {
     const level = emptyLevel();
     level.strokes.push({ points: [[1, 1]] });
     expect(kinds(buildLevelGroup(level)).stroke).toBeUndefined();
+  });
+
+  it('densely samples curved terrain into one continuous mesh', () => {
+    const level = emptyLevel();
+    level.strokes.push({ points: [[0, 0], [3, 3], [6, 0]] });
+    const group = buildLevelGroup(level);
+    const stroke = group.children.find((child) => child.userData.kind === 'stroke');
+    const terrain = stroke?.children[0] as { geometry?: THREE.BufferGeometry };
+    expect(terrain.geometry?.getAttribute('position').count).toBeGreaterThan(12);
   });
 });
 

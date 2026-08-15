@@ -26,6 +26,18 @@ const boostLevel = {
   finish: { x: 55, y: 0.8 },
 };
 
+const recoveryLevel = {
+  ...flatLevel,
+  start: { x: 0, y: 0.5, angle: Math.PI },
+  finish: { x: 45, y: 0.8 },
+};
+
+const landingLevel = {
+  ...flatLevel,
+  start: { x: 0, y: 8, angle: 0 },
+  finish: { x: 45, y: 0.8 },
+};
+
 let failures = 0;
 const pass = (message) => console.log(`PASS: ${message}`);
 const fail = (message) => {
@@ -166,6 +178,64 @@ try {
   peakVelocity > 3
     ? pass(`boost accelerated a coasting car to ${peakVelocity.toFixed(2)} units/s`)
     : fail(`boost peak velocity was only ${peakVelocity.toFixed(2)} units/s`);
+
+  await page.evaluate(() => window.__game.setMode('edit'));
+  const loadedLanding = await page.evaluate(
+    (level) => window.__game.loadLevel(level),
+    landingLevel,
+  );
+  if (!loadedLanding) {
+    throw new Error('debug handle rejected a valid landing level');
+  }
+  await page.evaluate(() => window.__game.setMode('play'));
+  let sawFastFall = false;
+  let landed = false;
+  let maximumRebound = 0;
+  for (let sample = 0; sample < 70; sample += 1) {
+    await page.waitForTimeout(50);
+    const state = await page.evaluate(() => ({
+      pose: window.__game.getCarPose(),
+      velocity: window.__game.getCarVelocity(),
+    }));
+    if ((state.velocity?.y ?? 0) < -5) sawFastFall = true;
+    if (sawFastFall && (state.pose?.y ?? Infinity) < 1.25) landed = true;
+    if (landed) {
+      maximumRebound = Math.max(maximumRebound, state.velocity?.y ?? 0);
+    }
+  }
+  sawFastFall && landed && maximumRebound < 0.75
+    ? pass(
+        `ordinary terrain absorbed the landing (${maximumRebound.toFixed(2)} rebound)`,
+      )
+    : fail(
+        `landing absorption failed: ${JSON.stringify({ sawFastFall, landed, maximumRebound })}`,
+      );
+
+  await page.evaluate(() => window.__game.setMode('edit'));
+  const loadedRecovery = await page.evaluate(
+    (level) => window.__game.loadLevel(level),
+    recoveryLevel,
+  );
+  if (!loadedRecovery) throw new Error('debug handle rejected a valid recovery level');
+  await page.evaluate(() => window.__game.setMode('play'));
+  await page.waitForTimeout(1_500);
+  const roofAngle = await page.evaluate(
+    () => Math.cos(window.__game.getCarPose()?.angle ?? 0),
+  );
+  if (roofAngle > -0.75) {
+    fail(`recovery scenario did not settle upside down: ${roofAngle.toFixed(2)}`);
+  }
+  await page.keyboard.down('d');
+  try {
+    await page.waitForFunction(
+      () => Math.cos(window.__game.getCarPose()?.angle ?? Math.PI) > 0.8,
+      null,
+      { timeout: 8_000 },
+    );
+  } finally {
+    await page.keyboard.up('d');
+  }
+  pass('D key rocked an overturned car back onto its wheels');
 
   if (pageErrors.length === 0) pass('browser reported no page or console errors');
   else fail(`browser errors: ${pageErrors.join(' | ')}`);

@@ -41,6 +41,12 @@ export function createCar(world: World, start: StartPose): Car {
     RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(poses.chassis.x, poses.chassis.y)
       .setRotation(start.angle)
+      .setAdditionalMassProperties(
+        T.BALLAST_MASS,
+        { x: 0, y: T.BALLAST_Y },
+        T.BALLAST_INERTIA,
+      )
+      .setAngularDamping(T.CHASSIS_ANGULAR_DAMPING)
       .setCcdEnabled(true)
       .setCanSleep(false),
   );
@@ -83,7 +89,7 @@ export function createCar(world: World, start: StartPose): Car {
       true,
     ) as RevoluteImpulseJoint;
     joint.setContactsEnabled(false);
-    joint.setMotorMaxForce(180);
+    joint.setMotorMaxForce(T.MOTOR_MAX_FORCE);
     wheels.push(wheel);
     wheelColliders.push(collider);
     joints.push(joint);
@@ -95,7 +101,6 @@ export function createCar(world: World, start: StartPose): Car {
 export function applyCarInput(
   car: Car,
   input: Input,
-  grounded: boolean,
 ): void {
   // Rapier is CCW-positive. A wheel rolling toward +x spins clockwise.
   const targetVelocity = input.gas
@@ -108,10 +113,28 @@ export function applyCarInput(
     joint.configureMotorVelocity(targetVelocity, strength);
   }
 
-  if (!grounded && (input.gas || input.brake)) {
-    const direction = input.gas ? -1 : 1;
+  const manualLean =
+    Number(Boolean(input.leanLeft)) - Number(Boolean(input.leanRight));
+  const upsideDown = Math.cos(car.chassis.rotation()) < 0;
+  if (manualLean !== 0) {
+    const torque = upsideDown ? T.RECOVERY_TORQUE : T.ROCK_TORQUE;
     car.chassis.applyTorqueImpulse(
-      direction * T.AIR_TORQUE * T.PHYS_DT,
+      manualLean * torque * T.PHYS_DT,
+      true,
+    );
+  }
+
+  if (upsideDown && manualLean !== 0) {
+    car.chassis.applyImpulse(
+      { x: 0, y: T.RECOVERY_LIFT * T.PHYS_DT },
+      true,
+    );
+  }
+
+  const angularVelocity = car.chassis.angvel();
+  if (Math.abs(angularVelocity) > T.MAX_CHASSIS_ANGULAR_SPEED) {
+    car.chassis.setAngvel(
+      Math.sign(angularVelocity) * T.MAX_CHASSIS_ANGULAR_SPEED,
       true,
     );
   }

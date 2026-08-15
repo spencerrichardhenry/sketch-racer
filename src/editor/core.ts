@@ -1,5 +1,6 @@
 import { type LevelData, type Vec2, cloneLevel } from '../level/types';
 import { simplify } from '../level/simplify';
+import { smoothStroke } from '../level/smooth';
 import * as T from '../sim/tuning';
 
 export type Tool =
@@ -207,15 +208,16 @@ export class EditorCore {
     const near = (x: number, y: number, radius = T.ERASE_RADIUS * 2) =>
       Math.hypot(point[0] - x, point[1] - y) <= radius;
     const nearStroke = (stroke: { points: Vec2[] }) => {
-      if (stroke.points.length === 1) {
-        return near(stroke.points[0][0], stroke.points[0][1], T.ERASE_RADIUS);
+      const points = smoothStroke(stroke.points);
+      if (points.length === 1) {
+        return near(points[0][0], points[0][1], T.ERASE_RADIUS);
       }
-      for (let index = 0; index < stroke.points.length - 1; index += 1) {
+      for (let index = 0; index < points.length - 1; index += 1) {
         if (
           distanceToSegment(
             point,
-            stroke.points[index],
-            stroke.points[index + 1],
+            points[index],
+            points[index + 1],
           ) <= T.ERASE_RADIUS
         ) {
           return true;

@@ -27,11 +27,49 @@ describe('SimWorld car', () => {
     world.free();
   });
 
+  it('absorbs vertical speed when landing on ordinary terrain', async () => {
+    const level = flatLevel();
+    level.start = { x: 0, y: 8, angle: 0 };
+    const world = await SimWorld.create(level);
+    let sawFastFall = false;
+    let landed = false;
+    let maximumRebound = 0;
+    for (let step = 0; step < 360; step += 1) {
+      world.step(NONE);
+      const pose = world.carPose();
+      const velocity = world.carVelocity();
+      if (velocity.y < -5) sawFastFall = true;
+      if (sawFastFall && pose.y < 1.25) landed = true;
+      if (landed) maximumRebound = Math.max(maximumRebound, velocity.y);
+    }
+    expect(sawFastFall).toBe(true);
+    expect(landed).toBe(true);
+    expect(maximumRebound, `rebounded at ${maximumRebound}`).toBeLessThan(0.75);
+    world.free();
+  });
+
   it('drives toward +x under gas', async () => {
     const world = await SimWorld.create(flatLevel());
     for (let step = 0; step < 180; step += 1) world.step(GAS);
-    expect(world.carPose().x).toBeGreaterThan(5);
-    expect(world.carVelocity().x).toBeGreaterThan(2);
+    expect(world.carPose().x).toBeGreaterThan(14);
+    expect(world.carVelocity().x).toBeGreaterThan(8);
+    world.free();
+  });
+
+  it('can rock itself upright after landing on its roof', async () => {
+    const level = flatLevel();
+    level.start.angle = Math.PI;
+    const world = await SimWorld.create(level);
+    for (let step = 0; step < 120; step += 1) world.step(NONE);
+    expect(Math.cos(world.carPose().angle)).toBeLessThan(-0.8);
+
+    let bestUpright = -1;
+    for (let step = 0; step < 180; step += 1) {
+      world.step({ ...NONE, leanRight: true });
+      bestUpright = Math.max(bestUpright, Math.cos(world.carPose().angle));
+    }
+    expect(bestUpright).toBeGreaterThan(0.9);
+    expect(Math.cos(world.carPose().angle)).toBeGreaterThan(0.8);
     world.free();
   });
 

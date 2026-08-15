@@ -25,12 +25,13 @@ Open the local URL printed by Vite. The bundled demo track includes terrain, boo
 
 ### Race mode
 
-- **W** or **→** — accelerate; tilts the car forward in the air.
-- **S** or **←** — reverse; tilts the car backward in the air.
+- **W** or **→** — accelerate.
+- **S** or **←** — reverse.
+- **A / D** — tilt in the air or rock the car back onto its wheels after a flip.
 - **R** — restart the run.
 - **Tab** — return to the editor.
 
-The clock starts on the first driving input. Falling off respawns the car while the clock keeps running.
+The clock starts on the first driving input. Ordinary terrain absorbs vertical landing speed instead of bouncing the car back upward; bounce pads remain springy. Falling off respawns the car while the clock keeps running.
 
 ## Verify
 
@@ -38,13 +39,13 @@ The clock starts on the first driving input. Falling off respawns the car while 
 npm test          # pure/unit and Rapier simulation tests
 npm run typecheck # strict TypeScript
 npm run build     # production bundle
-npm run verify    # Chromium e2e: editor, autosave, race finish, boost, screenshots
+npm run verify    # Chromium e2e: editor, race, landing, recovery, screenshots
 ```
 
 If Chromium is not already installed, run `npx playwright install chromium` once before `npm run verify`.
 
 ## Architecture
 
-`LevelData` JSON is the source of truth. The editor changes that data; Three.js meshes and the Rapier2D world are rebuilt from it. Physics stays entirely on the XY plane, while meshes are extruded along Z. Edit mode uses a front-on orthographic camera and race mode uses a perspective chase camera.
+`LevelData` JSON is the source of truth. The editor changes that data; a shared smooth curve is sampled for both the Three.js terrain mesh and the Rapier2D collider. Physics stays entirely on the XY plane, while meshes are extruded along Z. Edit mode uses a front-on orthographic camera and race mode uses a perspective chase camera.
 
 The approved v1 design is in [`docs/superpowers/specs/2026-08-15-sketch-racer-design.md`](docs/superpowers/specs/2026-08-15-sketch-racer-design.md).

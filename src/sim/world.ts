@@ -2,7 +2,8 @@ import RAPIER, {
   type Collider,
   type RigidBody,
 } from '@dimforge/rapier2d-compat';
-import type { LevelData, Paddle } from '../level/types';
+import { smoothStroke } from '../level/smooth';
+import type { LevelData, Paddle, Vec2 } from '../level/types';
 import { type Car, applyCarInput, createCar, spawnPoses } from './car';
 import { paddlePose } from './paddles';
 import type { Input } from './run';
@@ -29,6 +30,40 @@ type TrampolineRuntime = {
 };
 
 type PaddleRuntime = { body: RigidBody; definition: Paddle };
+type TerrainSegment = { start: Vec2; end: Vec2 };
+type TerrainRuntime = { collider: Collider; segments: TerrainSegment[] };
+
+function nearestTerrainTangent(
+  segments: TerrainSegment[],
+  point: { x: number; y: number },
+): { x: number; y: number } {
+  let nearestDistanceSquared = Infinity;
+  let nearest = { x: 1, y: 0 };
+  for (const { start, end } of segments) {
+    const deltaX = end[0] - start[0];
+    const deltaY = end[1] - start[1];
+    const lengthSquared = deltaX * deltaX + deltaY * deltaY;
+    if (lengthSquared < 1e-8) continue;
+    const amount = Math.max(
+      0,
+      Math.min(
+        1,
+        ((point.x - start[0]) * deltaX +
+          (point.y - start[1]) * deltaY) /
+          lengthSquared,
+      ),
+    );
+    const closestX = start[0] + deltaX * amount;
+    const closestY = start[1] + deltaY * amount;
+    const distanceSquared =
+      (point.x - closestX) ** 2 + (point.y - closestY) ** 2;
+    if (distanceSquared >= nearestDistanceSquared) continue;
+    const length = Math.sqrt(lengthSquared);
+    nearestDistanceSquared = distanceSquared;
+    nearest = { x: deltaX / length, y: deltaY / length };
+  }
+  return nearest;
+}
 
 export class SimWorld {
   timeS = 0;
@@ -40,6 +75,10 @@ export class SimWorld {
   private boosts: BoostRuntime[] = [];
   private trampolines: TrampolineRuntime[] = [];
   private paddles: PaddleRuntime[] = [];
+  private terrains: TerrainRuntime[] = [];
+  private terrainGripS = 0;
+  private wasOnTerrain = false;
+  private terrainTangent = { x: 1, y: 0 };
   private finishSensor!: Collider;
   private freed = false;
 
@@ -57,12 +96,21 @@ export class SimWorld {
     const fixedBody = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
 
     for (const stroke of level.strokes) {
-      if (stroke.points.length < 2) continue;
-      const vertices = new Float32Array(stroke.points.flat());
-      this.world.createCollider(
+      const points = smoothStroke(stroke.points);
+      if (points.length < 2) continue;
+      const vertices = new Float32Array(points.flat());
+      const collider = this.world.createCollider(
         RAPIER.ColliderDesc.polyline(vertices).setFriction(1),
         fixedBody,
       );
+      const segments: TerrainSegment[] = [];
+      for (let index = 0; index < points.length - 1; index += 1) {
+        segments.push({
+          start: points[index],
+          end: points[index + 1],
+        });
+      }
+      this.terrains.push({ collider, segments });
     }
 
     for (const boost of level.boosts) {
@@ -131,9 +179,16 @@ export class SimWorld {
       paddle.body.setNextKinematicRotation(pose.angle);
     }
 
-    applyCarInput(this.car, input, this.isGrounded());
+    applyCarInput(this.car, input);
+    const speedBeforeStep = [this.car.chassis, ...this.car.wheels].map(
+      (body) => {
+        const velocity = body.linvel();
+        return Math.hypot(velocity.x, velocity.y);
+      },
+    );
     this.world.timestep = deltaSeconds;
     this.world.step();
+    this.applyTerrainGrip(input, deltaSeconds, speedBeforeStep);
     this.applyGadgets(deltaSeconds);
 
     if (!this.finished) {
@@ -147,14 +202,76 @@ export class SimWorld {
     }
   }
 
-  private isGrounded(): boolean {
-    let grounded = false;
-    for (const wheelCollider of this.car.wheelColliders) {
-      this.world.contactPairsWith(wheelCollider, () => {
-        grounded = true;
+  private carTouches(collider: Collider): boolean {
+    let touching = false;
+    for (const carCollider of [
+      this.car.chassisCollider,
+      ...this.car.wheelColliders,
+    ]) {
+      this.world.contactPair(collider, carCollider, () => {
+        touching = true;
       });
+      if (touching) break;
     }
-    return grounded;
+    return touching;
+  }
+
+  private applyTerrainGrip(
+    input: Input,
+    deltaSeconds: number,
+    speedBeforeStep: number[],
+  ): void {
+    const terrain = this.terrains.find(({ collider }) =>
+      this.carTouches(collider),
+    );
+    const onTrampoline = this.trampolines.some(({ collider }) =>
+      this.carTouches(collider),
+    );
+    const recovering =
+      Math.cos(this.car.chassis.rotation()) < 0 &&
+      Boolean(input.leanLeft || input.leanRight);
+
+    if (onTrampoline || recovering) {
+      this.terrainGripS = 0;
+      this.wasOnTerrain = false;
+      return;
+    }
+
+    if (terrain) {
+      this.terrainTangent = nearestTerrainTangent(
+        terrain.segments,
+        this.car.chassis.translation(),
+      );
+      this.terrainGripS = T.TERRAIN_GRIP_S;
+      if (!this.wasOnTerrain) {
+        this.car.chassis.setAngvel(
+          this.car.chassis.angvel() * T.LANDING_ANGULAR_RETENTION,
+          true,
+        );
+      }
+    } else {
+      this.terrainGripS = Math.max(0, this.terrainGripS - deltaSeconds);
+    }
+    this.wasOnTerrain = Boolean(terrain);
+    if (this.terrainGripS <= 0) return;
+
+    const tangent = this.terrainTangent;
+    [this.car.chassis, ...this.car.wheels].forEach((body, index) => {
+      const velocity = body.linvel();
+      const alongTerrain = velocity.x * tangent.x + velocity.y * tangent.y;
+      const maximumSpeed = speedBeforeStep[index] + T.LANDING_MAX_SPEED_GAIN;
+      const clampedSpeed = Math.max(
+        -maximumSpeed,
+        Math.min(maximumSpeed, alongTerrain),
+      );
+      body.setLinvel(
+        {
+          x: tangent.x * clampedSpeed,
+          y: tangent.y * clampedSpeed,
+        },
+        true,
+      );
+    });
   }
 
   private applyGadgets(deltaSeconds: number): void {
@@ -254,6 +371,8 @@ export class SimWorld {
       wheel.setAngvel(0, true);
     });
     this.world.propagateModifiedBodyPositionsToColliders();
+    this.terrainGripS = 0;
+    this.wasOnTerrain = false;
   }
 
   restartRun(): void {

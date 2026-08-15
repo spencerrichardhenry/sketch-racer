@@ -66,6 +66,8 @@ export function createScene(canvas: HTMLCanvasElement): SceneCtx {
   sun.shadow.camera.right = 45;
   sun.shadow.camera.top = 35;
   sun.shadow.camera.bottom = -25;
+  sun.shadow.bias = -0.0002;
+  sun.shadow.normalBias = 0.04;
   scene.add(sun);
 
   const aspect = () => window.innerWidth / Math.max(1, window.innerHeight);

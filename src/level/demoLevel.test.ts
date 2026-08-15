@@ -16,10 +16,15 @@ describe('bundled demo level', () => {
 
   it('is finishable by a new player holding gas', async () => {
     const world = await SimWorld.create(demoLevel());
+    let furthestX = -Infinity;
     for (let step = 0; step < 2_400 && !world.finished; step += 1) {
       world.step({ gas: true, brake: false });
+      furthestX = Math.max(furthestX, world.carPose().x);
     }
-    expect(world.finished).toBe(true);
+    expect(
+      world.finished,
+      `stopped at ${JSON.stringify(world.carPose())}; furthest x ${furthestX}`,
+    ).toBe(true);
     world.free();
   });
 });

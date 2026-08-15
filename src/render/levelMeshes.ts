@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { LevelData, Vec2 } from '../level/types';
+import { smoothStroke } from '../level/smooth';
 import { paddlePose } from '../sim/paddles';
 import * as T from '../sim/tuning';
 
@@ -8,10 +9,12 @@ const materials = {
     color: 0x435266,
     roughness: 0.82,
     metalness: 0.08,
+    side: THREE.DoubleSide,
   }),
   terrainTop: new THREE.MeshStandardMaterial({
     color: 0x7893ad,
     roughness: 0.68,
+    side: THREE.DoubleSide,
   }),
   boostBase: new THREE.MeshStandardMaterial({
     color: 0xf97316,
@@ -54,6 +57,7 @@ const materials = {
     color: 0x7dd3fc,
     transparent: true,
     opacity: 0.82,
+    side: THREE.DoubleSide,
   }),
 };
 
@@ -66,25 +70,87 @@ function markShadows(object: THREE.Object3D): void {
   });
 }
 
-function segmentMesh(
-  start: Vec2,
-  end: Vec2,
+function strokeNormal(points: Vec2[], index: number): Vec2 {
+  const previous = points[Math.max(0, index - 1)];
+  const next = points[Math.min(points.length - 1, index + 1)];
+  const deltaX = next[0] - previous[0];
+  const deltaY = next[1] - previous[1];
+  const length = Math.hypot(deltaX, deltaY);
+  return length > 1e-6 ? [-deltaY / length, deltaX / length] : [0, 1];
+}
+
+function offsetStroke(points: Vec2[], offset: number): Vec2[] {
+  return points.map((point, index) => {
+    const normal = strokeNormal(points, index);
+    return [point[0] + normal[0] * offset, point[1] + normal[1] * offset];
+  });
+}
+
+function strokeGeometry(
+  points: Vec2[],
+  thickness: number,
+  depth: number,
+): THREE.BufferGeometry | null {
+  if (points.length < 2) return null;
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const halfThickness = thickness / 2;
+  const halfDepth = depth / 2;
+
+  points.forEach((point, index) => {
+    const normal = strokeNormal(points, index);
+    const topX = point[0] + normal[0] * halfThickness;
+    const topY = point[1] + normal[1] * halfThickness;
+    const bottomX = point[0] - normal[0] * halfThickness;
+    const bottomY = point[1] - normal[1] * halfThickness;
+    positions.push(
+      topX,
+      topY,
+      halfDepth,
+      bottomX,
+      bottomY,
+      halfDepth,
+      topX,
+      topY,
+      -halfDepth,
+      bottomX,
+      bottomY,
+      -halfDepth,
+    );
+  });
+
+  const quad = (a: number, b: number, c: number, d: number) => {
+    indices.push(a, b, c, a, c, d);
+  };
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const current = index * 4;
+    const next = (index + 1) * 4;
+    quad(current, current + 1, next + 1, next); // front
+    quad(current + 2, next + 2, next + 3, current + 3); // back
+    quad(current, next, next + 2, current + 2); // upper driving surface
+    quad(current + 1, current + 3, next + 3, next + 1); // underside
+  }
+  const last = (points.length - 1) * 4;
+  quad(0, 2, 3, 1);
+  quad(last, last + 1, last + 3, last + 2);
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function strokeMesh(
+  points: Vec2[],
   thickness: number,
   depth: number,
   material: THREE.Material,
 ): THREE.Mesh | null {
-  const length = Math.hypot(end[0] - start[0], end[1] - start[1]);
-  if (length < 1e-6) return null;
-  const mesh = new THREE.Mesh(
-    new THREE.BoxGeometry(length + thickness * 0.55, thickness, depth),
-    material,
-  );
-  mesh.position.set(
-    (start[0] + end[0]) / 2,
-    (start[1] + end[1]) / 2,
-    0,
-  );
-  mesh.rotation.z = Math.atan2(end[1] - start[1], end[0] - start[0]);
+  const geometry = strokeGeometry(points, thickness, depth);
+  if (!geometry) return null;
+  const mesh = new THREE.Mesh(geometry, material);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   return mesh;
@@ -257,37 +323,20 @@ export function buildLevelGroup(level: LevelData): THREE.Group {
   group.name = 'level';
 
   for (const stroke of level.strokes) {
-    for (let index = 0; index < stroke.points.length - 1; index += 1) {
-      const segment = segmentMesh(
-        stroke.points[index],
-        stroke.points[index + 1],
-        0.34,
-        T.DEPTH,
-        materials.terrain,
-      );
-      if (!segment) continue;
-      segment.userData.kind = 'stroke';
-      group.add(segment);
-
-      const top = segmentMesh(
-        stroke.points[index],
-        stroke.points[index + 1],
-        0.08,
-        T.DEPTH + 0.05,
-        materials.terrainTop,
-      );
-      if (top) {
-        const angle = Math.atan2(
-          stroke.points[index + 1][1] - stroke.points[index][1],
-          stroke.points[index + 1][0] - stroke.points[index][0],
-        );
-        top.position.x += -Math.sin(angle) * 0.18;
-        top.position.y += Math.cos(angle) * 0.18;
-        segment.add(top);
-        top.position.sub(segment.position);
-        top.rotation.z -= segment.rotation.z;
-      }
-    }
+    const points = smoothStroke(stroke.points);
+    const terrain = strokeMesh(points, 0.34, T.DEPTH, materials.terrain);
+    if (!terrain) continue;
+    const strokeGroup = new THREE.Group();
+    strokeGroup.userData.kind = 'stroke';
+    strokeGroup.add(terrain);
+    const highlight = strokeMesh(
+      offsetStroke(points, 0.205),
+      0.055,
+      T.DEPTH + 0.06,
+      materials.terrainTop,
+    );
+    if (highlight) strokeGroup.add(highlight);
+    group.add(strokeGroup);
   }
 
   for (const boost of level.boosts) {
@@ -312,18 +361,15 @@ export function buildLevelGroup(level: LevelData): THREE.Group {
 export function buildStrokePreview(points: Vec2[]): THREE.Group {
   const group = new THREE.Group();
   group.name = 'stroke-preview';
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const segment = segmentMesh(
-      points[index],
-      points[index + 1],
-      0.17,
-      0.16,
-      materials.preview,
-    );
-    if (segment) {
-      segment.position.z = T.DEPTH * 0.65;
-      group.add(segment);
-    }
+  const preview = strokeMesh(
+    smoothStroke(points, 0.12),
+    0.17,
+    0.16,
+    materials.preview,
+  );
+  if (preview) {
+    preview.position.z = T.DEPTH * 0.65;
+    group.add(preview);
   }
   return group;
 }

@@ -163,7 +163,7 @@ export function createHud(host: HTMLElement, callbacks: HudCallbacks): Hud {
       hint.textContent =
         mode === 'edit'
           ? 'Drag to build · Space + drag to pan · Scroll to zoom · Tab to race'
-          : 'W / → gas · S / ← reverse · R restart · Tab edit';
+          : 'W / → gas · S / ← reverse · A / D rock · R restart · Tab edit';
       if (mode === 'edit') hud.hideResults();
     },
     setTool(tool) {

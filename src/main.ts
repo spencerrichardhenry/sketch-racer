@@ -20,7 +20,12 @@ declare global {
       getLevel(): LevelData;
       loadLevel(json: unknown): boolean;
       setMode(mode: 'edit' | 'play'): Promise<void>;
-      setInput(input: { gas?: boolean; brake?: boolean }): void;
+      setInput(input: {
+        gas?: boolean;
+        brake?: boolean;
+        leanLeft?: boolean;
+        leanRight?: boolean;
+      }): void;
       getCarPose(): { x: number; y: number; angle: number } | null;
       getCarVelocity(): { x: number; y: number } | null;
       getRunState(): RunState;
@@ -184,6 +189,14 @@ async function boot(): Promise<void> {
         event.preventDefault();
         game.input.brake = true;
       }
+      if (event.code === 'KeyA') {
+        event.preventDefault();
+        game.input.leanLeft = true;
+      }
+      if (event.code === 'KeyD') {
+        event.preventDefault();
+        game.input.leanRight = true;
+      }
       if (event.code === 'KeyR' && !event.repeat) {
         hud.hideResults();
         game.restart();
@@ -211,6 +224,8 @@ async function boot(): Promise<void> {
     if (event.code === 'KeyS' || event.code === 'ArrowLeft') {
       game.input.brake = false;
     }
+    if (event.code === 'KeyA') game.input.leanLeft = false;
+    if (event.code === 'KeyD') game.input.leanRight = false;
   });
 
   window.addEventListener('blur', () => {
@@ -229,7 +244,12 @@ async function boot(): Promise<void> {
     },
     setMode: (mode) => game.setMode(mode),
     setInput: (input) => {
-      game.input = { gas: Boolean(input.gas), brake: Boolean(input.brake) };
+      game.input = {
+        gas: Boolean(input.gas),
+        brake: Boolean(input.brake),
+        leanLeft: Boolean(input.leanLeft),
+        leanRight: Boolean(input.leanRight),
+      };
     },
     getCarPose: () => game.sim?.carPose() ?? null,
     getCarVelocity: () => game.sim?.carVelocity() ?? null,

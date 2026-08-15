@@ -13,6 +13,13 @@ describe('run state', () => {
     expect(tickRun(idle, 16, GAS)).toEqual({ phase: 'running', timeMs: 16 });
   });
 
+  it('starts when the player uses the rocking controls', () => {
+    expect(tickRun(createRun(), 16, { ...NONE, leanLeft: true })).toEqual({
+      phase: 'running',
+      timeMs: 16,
+    });
+  });
+
   it('continues timing while coasting', () => {
     const started = tickRun(createRun(), 16, GAS);
     expect(tickRun(started, 16, NONE).timeMs).toBe(32);
