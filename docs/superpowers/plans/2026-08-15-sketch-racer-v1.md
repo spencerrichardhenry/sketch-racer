@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A browser game where you sketch a 2D side-view level (freehand terrain, boost pads, trampolines, oscillating pong paddles, start/finish), then drive a physics car through it for time, rendered in simple 3D.
+**Goal:** A browser game where you sketch a 2D side-view level (freehand terrain, boost pads, trampolines, oscillating pong paddles, start/finish), then drive one of three physics vehicles (car, motorcycle, plane) through it for time, rendered in simple 3D.
 
 **Architecture:** One Three.js scene, two modes. Edit mode uses an orthographic front-on camera (looks 2D); Play mode uses a perspective chase camera. Physics is strictly 2D via Rapier2D on the XY plane; all render geometry is extruded in Z. `LevelData` (plain JSON) is the single source of truth — physics bodies and meshes are always derived from it, never persisted.
 
@@ -38,13 +38,13 @@ src/
   sim/tuning.ts        # all physics/gameplay constants
   sim/paddles.ts       # paddlePose oscillation math (pure)
   sim/run.ts           # run state machine (timer), killY (pure)
-  sim/car.ts           # car bodies/joints/motors
+  sim/vehicles.ts      # VEHICLE_SPECS table, createVehicle, motors/thrust/lift per kind
   sim/world.ts         # SimWorld: LevelData → Rapier world, step, gadget logic
   render/scene.ts      # renderer, cameras, lights, chase-cam update
   render/levelMeshes.ts# LevelData → extruded meshes
-  render/carMesh.ts    # car mesh build + sync
-  ui/hud.ts            # toolbar, timer, results overlay, save/load panel, toasts
-e2e/verify.mjs         # Playwright script: drive to finish; boost check
+  render/vehicleMesh.ts# per-kind vehicle mesh build + sync
+  ui/hud.ts            # toolbar, vehicle picker, timer, results overlay, save/load, toasts
+e2e/verify.mjs         # Playwright script: drive to finish; boost check; moto beats car
 ```
 
 ---
@@ -634,16 +634,8 @@ git add src/level && git commit -m "feat: localStorage level store with autosave
 export const PHYS_DT = 1 / 60;
 export const GRAVITY_Y = -20;
 
-// Car
-export const CHASSIS_HX = 1.0; // half-extents
-export const CHASSIS_HY = 0.35;
-export const WHEEL_RADIUS = 0.42;
-export const WHEEL_OFFSET_X = 0.72; // wheel anchor offsets in chassis-local space
-export const WHEEL_OFFSET_Y = -0.42;
+// Vehicles (per-kind physics parameters live in VEHICLE_SPECS in sim/vehicles.ts, Task 7)
 export const SPAWN_LIFT = 1.0; // spawn chassis this far above start point
-export const MOTOR_SPEED = 32; // rad/s wheel target
-export const MOTOR_FACTOR = 45; // motor strength
-export const AIR_TORQUE = 26; // chassis tilt torque while airborne
 
 // Gadgets
 export const BOOST_HX = 1.2;
@@ -753,7 +745,7 @@ git add src/sim && git commit -m "feat: tuning constants and paddle oscillation 
 **Interfaces:**
 - Consumes: `LevelData` from `../level/types`, `KILL_MARGIN` from `./tuning`.
 - Produces:
-  - `type Input = { gas: boolean; brake: boolean }`
+  - `type Input = { gas: boolean; brake: boolean; tiltBack?: boolean; tiltFwd?: boolean }` — tilt fields are optional so test literals stay short; tilt input does NOT start the run timer (only gas/brake do)
   - `type RunState = { phase: 'idle' | 'running' | 'finished'; timeMs: number }`
   - `createRun(): RunState`
   - `tickRun(s: RunState, dtMs: number, input: Input): RunState` — timer starts on first input, accumulates while running, frozen when finished. Pure (returns new object).
@@ -855,7 +847,7 @@ Run: `npx vitest run src/sim/run.test.ts src/game/loop.test.ts` — Expected: FA
 import type { LevelData } from '../level/types';
 import { KILL_MARGIN } from './tuning';
 
-export type Input = { gas: boolean; brake: boolean };
+export type Input = { gas: boolean; brake: boolean; tiltBack?: boolean; tiltFwd?: boolean };
 export type RunPhase = 'idle' | 'running' | 'finished';
 export type RunState = { phase: RunPhase; timeMs: number };
 
@@ -920,26 +912,31 @@ git add src/sim src/game && git commit -m "feat: run state machine, killY, fixed
 
 ---
 
-### Task 7: Rapier world + drivable car
+### Task 7: Rapier world + drivable vehicles (car, motorcycle, plane)
 
 **Files:**
-- Create: `src/sim/car.ts`, `src/sim/world.ts`
+- Create: `src/sim/vehicles.ts`, `src/sim/world.ts`
 - Test: `src/sim/world.test.ts`
 
 **Interfaces:**
 - Consumes: `LevelData`, `StartPose`, `Paddle` from `../level/types`; `paddlePose`; `Input` from `./run`; tuning constants.
-- Produces (used by Game in Task 12 and by Task 8):
-  - `initRapier(): Promise<unknown>` — idempotent `RAPIER.init()` wrapper.
-  - `spawnPoses(start: StartPose): { chassis: {x,y}; wheels: {x,y}[] }` (in `car.ts`)
-  - `createCar(world: World, start: StartPose): Car` where `Car = { chassis: RigidBody; chassisCollider: Collider; wheels: RigidBody[]; wheelColliders: Collider[]; joints: RevoluteImpulseJoint[] }`
-  - `applyCarInput(car: Car, input: Input, grounded: boolean): void`
-  - `class SimWorld` with: `static create(level: LevelData): Promise<SimWorld>`, `step(input: Input, dtS?: number): void`, `carPose(): {x,y,angle}`, `wheelPoses(): {x,y,angle}[]`, `paddlePoses(): {x,y,angle}[]`, `carVelocity(): {x,y}`, `finished: boolean`, `restartRun(): void` (respawn + clears `finished`), `free(): void`, `timeS: number`.
+- Produces (used by Game in Task 12 and by Tasks 8/8B/9):
+  - `initRapier(): Promise<unknown>` — idempotent `RAPIER.init()` wrapper (in `world.ts`).
+  - `type VehicleKind = 'car' | 'motorcycle' | 'plane'`, `const VEHICLE_KINDS: VehicleKind[]`
+  - `type VehicleSpec` and `const VEHICLE_SPECS: Record<VehicleKind, VehicleSpec>` — the per-kind parameter table (also imported by `render/vehicleMesh.ts` for sizes).
+  - `spawnPoses(start: StartPose, kind: VehicleKind): { chassis: {x,y}; wheels: {x,y}[] }`
+  - `createVehicle(world: World, start: StartPose, kind: VehicleKind): Vehicle` where `Vehicle = { kind: VehicleKind; chassis: RigidBody; chassisCollider: Collider; wheels: RigidBody[]; wheelColliders: Collider[]; joints: RevoluteImpulseJoint[] }`
+  - `applyVehicleInput(v: Vehicle, input: Input, grounded: boolean): void` — motors for car/motorcycle; thrust + lift + drag for plane; tilt torque from `input.tiltBack`/`tiltFwd`.
+  - `class SimWorld` with: `static create(level: LevelData, kind?: VehicleKind): Promise<SimWorld>` (default `'car'`), `step(input: Input, dtS?: number): void`, `carPose(): {x,y,angle}`, `wheelPoses(): {x,y,angle}[]`, `paddlePoses(): {x,y,angle}[]`, `carVelocity(): {x,y}`, `finished: boolean`, `respawnCar(): void` (reset poses/velocities only), `restartRun(): void` (respawn + clears `finished`), `free(): void`, `timeS: number`, `kind: VehicleKind`.
+    (`carPose`/`carVelocity` refer to the active vehicle whatever its kind — the short names are kept because Tasks 8–13 and the e2e handle use them.)
 
 **Domain notes for the implementer:**
-- Rapier 2D angles are radians, CCW-positive. A car rolling toward +x has *negative* wheel angular velocity. That is why the motor target for "gas" is `-MOTOR_SPEED`. If the finished car drives backward under gas, flip that sign — the test below catches it.
+- Rapier 2D angles are radians, CCW-positive. A vehicle rolling toward +x has *negative* wheel angular velocity. That is why the motor target for "gas" is `-spec.motorSpeed`. If the finished car drives backward under gas, flip that sign — the test below catches it.
 - `world.timestep` must be set before `world.step()`.
 - `RAPIER.JointData.revolute(anchorOnBody1, anchorOnBody2)` takes body-local anchors. Cast the created joint to `RAPIER.RevoluteImpulseJoint` to call `configureMotorVelocity(targetVel, factor)`.
 - `world.contactPairsWith(collider, cb)` invokes `cb` for colliders currently in contact — used for grounded checks. `world.intersectionPair(a, b)` returns true when a sensor pair overlaps.
+- Forces are applied as impulses scaled by `PHYS_DT` (`applyImpulse(F * dt)`), which is equivalent to a force over one step and keeps everything in one call.
+- The plane's numbers interact: thrust vs `dragCoef` sets top speed (`v_max ≈ sqrt(thrust/dragCoef)`), `liftCoef · v²` vs weight sets takeoff speed. If Task 8B's plane tests fail, tune `liftCoef`/`dragCoef`/`thrust`/`angularDamping` in `VEHICLE_SPECS.plane` — do not restructure the code.
 
 - [ ] **Step 1: Write failing tests** — `src/sim/world.test.ts`
 
@@ -1009,6 +1006,16 @@ describe('SimWorld car', () => {
     expect(Math.abs(w.carVelocity().x)).toBeLessThan(0.01);
     w.free();
   });
+
+  it('creates each vehicle kind without error', async () => {
+    for (const kind of ['car', 'motorcycle', 'plane'] as const) {
+      const w = await SimWorld.create(flatLevel(), kind);
+      expect(w.kind).toBe(kind);
+      for (let i = 0; i < 60; i++) w.step(NONE);
+      expect(w.carPose().y).toBeGreaterThan(-1); // settled, not through the floor
+      w.free();
+    }
+  });
 });
 ```
 
@@ -1016,7 +1023,7 @@ describe('SimWorld car', () => {
 
 Run: `npx vitest run src/sim/world.test.ts` — Expected: FAIL, modules not found.
 
-- [ ] **Step 3: Implement src/sim/car.ts**
+- [ ] **Step 3: Implement src/sim/vehicles.ts**
 
 ```ts
 import RAPIER, {
@@ -1029,7 +1036,56 @@ import type { StartPose } from '../level/types';
 import type { Input } from './run';
 import * as T from './tuning';
 
-export type Car = {
+export type VehicleKind = 'car' | 'motorcycle' | 'plane';
+export const VEHICLE_KINDS: VehicleKind[] = ['car', 'motorcycle', 'plane'];
+
+export type VehicleSpec = {
+  chassisHx: number;
+  chassisHy: number;
+  chassisDensity: number;
+  chassisFriction: number;
+  wheelRadius: number;
+  wheelOffsetX: number;
+  wheelOffsetY: number;
+  wheelDensity: number;
+  wheelFriction: number;
+  motorSpeed: number; // rad/s wheel target; 0 = unpowered wheels
+  motorFactor: number;
+  tiltTorque: number;
+  tiltAlways: boolean; // plane can pitch on the ground too
+  thrust: number; // forward force under gas; 0 for ground vehicles
+  reverseThrust: number;
+  liftCoef: number; // lift force = liftCoef * forwardSpeed^2 along body-up
+  dragCoef: number; // drag force = dragCoef * speed^2 opposing velocity
+  angularDamping: number;
+};
+
+export const VEHICLE_SPECS: Record<VehicleKind, VehicleSpec> = {
+  car: {
+    chassisHx: 1.0, chassisHy: 0.35, chassisDensity: 2, chassisFriction: 0.4,
+    wheelRadius: 0.42, wheelOffsetX: 0.72, wheelOffsetY: -0.42, wheelDensity: 1.2, wheelFriction: 1.6,
+    motorSpeed: 32, motorFactor: 45,
+    tiltTorque: 26, tiltAlways: false,
+    thrust: 0, reverseThrust: 0, liftCoef: 0, dragCoef: 0, angularDamping: 0,
+  },
+  motorcycle: {
+    chassisHx: 0.7, chassisHy: 0.25, chassisDensity: 0.9, chassisFriction: 0.4,
+    wheelRadius: 0.38, wheelOffsetX: 0.55, wheelOffsetY: -0.35, wheelDensity: 0.7, wheelFriction: 1.8,
+    motorSpeed: 46, motorFactor: 30,
+    tiltTorque: 18, tiltAlways: false,
+    thrust: 0, reverseThrust: 0, liftCoef: 0, dragCoef: 0, angularDamping: 0,
+  },
+  plane: {
+    chassisHx: 1.3, chassisHy: 0.22, chassisDensity: 0.8, chassisFriction: 0.5,
+    wheelRadius: 0.25, wheelOffsetX: 0.9, wheelOffsetY: -0.4, wheelDensity: 0.4, wheelFriction: 0.3,
+    motorSpeed: 0, motorFactor: 0,
+    tiltTorque: 14, tiltAlways: true,
+    thrust: 35, reverseThrust: 12, liftCoef: 0.09, dragCoef: 0.02, angularDamping: 1.5,
+  },
+};
+
+export type Vehicle = {
+  kind: VehicleKind;
   chassis: RigidBody;
   chassisCollider: Collider;
   wheels: RigidBody[];
@@ -1037,32 +1093,41 @@ export type Car = {
   joints: RevoluteImpulseJoint[];
 };
 
-const WHEEL_LOCAL: [number, number][] = [
-  [-T.WHEEL_OFFSET_X, T.WHEEL_OFFSET_Y],
-  [T.WHEEL_OFFSET_X, T.WHEEL_OFFSET_Y],
-];
+function wheelLocal(spec: VehicleSpec): [number, number][] {
+  return [
+    [-spec.wheelOffsetX, spec.wheelOffsetY],
+    [spec.wheelOffsetX, spec.wheelOffsetY],
+  ];
+}
 
-export function spawnPoses(start: StartPose): {
+export function spawnPoses(start: StartPose, kind: VehicleKind): {
   chassis: { x: number; y: number };
   wheels: { x: number; y: number }[];
 } {
+  const spec = VEHICLE_SPECS[kind];
   const cos = Math.cos(start.angle);
   const sin = Math.sin(start.angle);
   const chassis = { x: start.x, y: start.y + T.SPAWN_LIFT };
-  const wheels = WHEEL_LOCAL.map(([lx, ly]) => ({
+  const wheels = wheelLocal(spec).map(([lx, ly]) => ({
     x: chassis.x + lx * cos - ly * sin,
     y: chassis.y + lx * sin + ly * cos,
   }));
   return { chassis, wheels };
 }
 
-export function createCar(world: World, start: StartPose): Car {
-  const poses = spawnPoses(start);
+export function createVehicle(world: World, start: StartPose, kind: VehicleKind): Vehicle {
+  const spec = VEHICLE_SPECS[kind];
+  const poses = spawnPoses(start, kind);
   const chassis = world.createRigidBody(
-    RAPIER.RigidBodyDesc.dynamic().setTranslation(poses.chassis.x, poses.chassis.y).setRotation(start.angle),
+    RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(poses.chassis.x, poses.chassis.y)
+      .setRotation(start.angle)
+      .setAngularDamping(spec.angularDamping),
   );
   const chassisCollider = world.createCollider(
-    RAPIER.ColliderDesc.cuboid(T.CHASSIS_HX, T.CHASSIS_HY).setDensity(2).setFriction(0.4),
+    RAPIER.ColliderDesc.cuboid(spec.chassisHx, spec.chassisHy)
+      .setDensity(spec.chassisDensity)
+      .setFriction(spec.chassisFriction),
     chassis,
   );
   const wheels: RigidBody[] = [];
@@ -1071,25 +1136,56 @@ export function createCar(world: World, start: StartPose): Car {
   poses.wheels.forEach((wp, i) => {
     const wheel = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(wp.x, wp.y));
     const col = world.createCollider(
-      RAPIER.ColliderDesc.ball(T.WHEEL_RADIUS).setDensity(1.2).setFriction(1.6).setRestitution(0),
+      RAPIER.ColliderDesc.ball(spec.wheelRadius)
+        .setDensity(spec.wheelDensity)
+        .setFriction(spec.wheelFriction)
+        .setRestitution(0),
       wheel,
     );
-    const [lx, ly] = WHEEL_LOCAL[i];
+    const [lx, ly] = wheelLocal(spec)[i];
     const jd = RAPIER.JointData.revolute({ x: lx, y: ly }, { x: 0, y: 0 });
     const joint = world.createImpulseJoint(jd, chassis, wheel, true) as RevoluteImpulseJoint;
     wheels.push(wheel);
     wheelColliders.push(col);
     joints.push(joint);
   });
-  return { chassis, chassisCollider, wheels, wheelColliders, joints };
+  return { kind, chassis, chassisCollider, wheels, wheelColliders, joints };
 }
 
-export function applyCarInput(car: Car, input: Input, grounded: boolean): void {
-  // CCW-positive: rolling toward +x means negative wheel angular velocity.
-  const target = input.gas ? -T.MOTOR_SPEED : input.brake ? T.MOTOR_SPEED : 0;
-  for (const j of car.joints) j.configureMotorVelocity(target, T.MOTOR_FACTOR);
-  if (!grounded && (input.gas || input.brake)) {
-    car.chassis.applyTorqueImpulse((input.gas ? -T.AIR_TORQUE : T.AIR_TORQUE) * T.PHYS_DT, true);
+export function applyVehicleInput(v: Vehicle, input: Input, grounded: boolean): void {
+  const spec = VEHICLE_SPECS[v.kind];
+
+  if (spec.motorFactor > 0) {
+    // CCW-positive: rolling toward +x means negative wheel angular velocity.
+    const target = input.gas ? -spec.motorSpeed : input.brake ? spec.motorSpeed : 0;
+    for (const j of v.joints) j.configureMotorVelocity(target, spec.motorFactor);
+  }
+
+  const angle = v.chassis.rotation();
+  if (spec.thrust > 0) {
+    const f = input.gas ? spec.thrust : input.brake ? -spec.reverseThrust : 0;
+    if (f !== 0) {
+      v.chassis.applyImpulse({ x: Math.cos(angle) * f * T.PHYS_DT, y: Math.sin(angle) * f * T.PHYS_DT }, true);
+    }
+  }
+
+  if (spec.liftCoef > 0) {
+    const vel = v.chassis.linvel();
+    const fwd = { x: Math.cos(angle), y: Math.sin(angle) };
+    const up = { x: -Math.sin(angle), y: Math.cos(angle) };
+    const vFwd = vel.x * fwd.x + vel.y * fwd.y;
+    const lift = Math.min(spec.liftCoef * vFwd * Math.abs(vFwd), 60) * T.PHYS_DT;
+    v.chassis.applyImpulse({ x: up.x * lift, y: up.y * lift }, true);
+    const speed = Math.hypot(vel.x, vel.y);
+    if (speed > 0.01) {
+      const drag = spec.dragCoef * speed * speed * T.PHYS_DT;
+      v.chassis.applyImpulse({ x: (-vel.x / speed) * drag, y: (-vel.y / speed) * drag }, true);
+    }
+  }
+
+  const tiltDir = (input.tiltBack ? 1 : 0) - (input.tiltFwd ? 1 : 0); // CCW-positive = nose up
+  if (tiltDir !== 0 && (spec.tiltAlways || !grounded)) {
+    v.chassis.applyTorqueImpulse(tiltDir * spec.tiltTorque * T.PHYS_DT, true);
   }
 }
 ```
@@ -1099,10 +1195,10 @@ export function applyCarInput(car: Car, input: Input, grounded: boolean): void {
 ```ts
 import RAPIER, { type Collider, type RigidBody } from '@dimforge/rapier2d-compat';
 import type { LevelData, Paddle } from '../level/types';
-import { type Car, applyCarInput, createCar, spawnPoses } from './car';
 import { paddlePose } from './paddles';
 import type { Input } from './run';
 import * as T from './tuning';
+import { type Vehicle, type VehicleKind, applyVehicleInput, createVehicle, spawnPoses } from './vehicles';
 
 let rapierInit: Promise<unknown> | null = null;
 export function initRapier(): Promise<unknown> {
@@ -1117,18 +1213,20 @@ type PaddleRt = { body: RigidBody; def: Paddle };
 export class SimWorld {
   timeS = 0;
   finished = false;
+  kind: VehicleKind = 'car';
 
   private world!: RAPIER.World;
-  private car!: Car;
+  private vehicle!: Vehicle;
   private level!: LevelData;
   private boosts: BoostRt[] = [];
   private tramps: TrampRt[] = [];
   private paddles: PaddleRt[] = [];
   private finishSensor!: Collider;
 
-  static async create(level: LevelData): Promise<SimWorld> {
+  static async create(level: LevelData, kind: VehicleKind = 'car'): Promise<SimWorld> {
     await initRapier();
     const s = new SimWorld();
+    s.kind = kind;
     s.build(level);
     return s;
   }
@@ -1176,7 +1274,7 @@ export class SimWorld {
       RAPIER.ColliderDesc.cuboid(0.6, 1.5).setTranslation(level.finish.x, level.finish.y).setSensor(true),
       fixed,
     );
-    this.car = createCar(this.world, level.start);
+    this.vehicle = createVehicle(this.world, level.start, this.kind);
   }
 
   step(input: Input, dtS: number = T.PHYS_DT): void {
@@ -1186,18 +1284,18 @@ export class SimWorld {
       p.body.setNextKinematicTranslation({ x: pose.x, y: pose.y });
       p.body.setNextKinematicRotation(pose.angle);
     }
-    applyCarInput(this.car, input, this.grounded());
+    applyVehicleInput(this.vehicle, input, this.grounded());
     this.world.timestep = dtS;
     this.world.step();
     this.applyGadgets(dtS);
-    if (!this.finished && this.world.intersectionPair(this.finishSensor, this.car.chassisCollider)) {
+    if (!this.finished && this.world.intersectionPair(this.finishSensor, this.vehicle.chassisCollider)) {
       this.finished = true;
     }
   }
 
   private grounded(): boolean {
     let g = false;
-    for (const wc of this.car.wheelColliders) {
+    for (const wc of this.vehicle.wheelColliders) {
       this.world.contactPairsWith(wc, () => {
         g = true;
       });
@@ -1208,8 +1306,8 @@ export class SimWorld {
   private applyGadgets(dtS: number): void {
     for (const b of this.boosts) {
       b.cooldown = Math.max(0, b.cooldown - dtS);
-      if (b.cooldown === 0 && this.world.intersectionPair(b.collider, this.car.chassisCollider)) {
-        this.car.chassis.applyImpulse({ x: b.dir.x * T.BOOST_IMPULSE, y: b.dir.y * T.BOOST_IMPULSE }, true);
+      if (b.cooldown === 0 && this.world.intersectionPair(b.collider, this.vehicle.chassisCollider)) {
+        this.vehicle.chassis.applyImpulse({ x: b.dir.x * T.BOOST_IMPULSE, y: b.dir.y * T.BOOST_IMPULSE }, true);
         b.cooldown = T.BOOST_COOLDOWN_S;
       }
     }
@@ -1217,25 +1315,25 @@ export class SimWorld {
       t.cooldown = Math.max(0, t.cooldown - dtS);
       if (t.cooldown > 0) continue;
       let touching = false;
-      for (const c of [this.car.chassisCollider, ...this.car.wheelColliders]) {
+      for (const c of [this.vehicle.chassisCollider, ...this.vehicle.wheelColliders]) {
         this.world.contactPair(t.collider, c, () => {
           touching = true;
         });
       }
       if (touching) {
-        this.car.chassis.applyImpulse({ x: t.normal.x * T.TRAMP_IMPULSE, y: t.normal.y * T.TRAMP_IMPULSE }, true);
+        this.vehicle.chassis.applyImpulse({ x: t.normal.x * T.TRAMP_IMPULSE, y: t.normal.y * T.TRAMP_IMPULSE }, true);
         t.cooldown = T.TRAMP_COOLDOWN_S;
       }
     }
   }
 
   carPose(): { x: number; y: number; angle: number } {
-    const t = this.car.chassis.translation();
-    return { x: t.x, y: t.y, angle: this.car.chassis.rotation() };
+    const t = this.vehicle.chassis.translation();
+    return { x: t.x, y: t.y, angle: this.vehicle.chassis.rotation() };
   }
 
   wheelPoses(): { x: number; y: number; angle: number }[] {
-    return this.car.wheels.map((w) => {
+    return this.vehicle.wheels.map((w) => {
       const t = w.translation();
       return { x: t.x, y: t.y, angle: w.rotation() };
     });
@@ -1249,22 +1347,26 @@ export class SimWorld {
   }
 
   carVelocity(): { x: number; y: number } {
-    const v = this.car.chassis.linvel();
+    const v = this.vehicle.chassis.linvel();
     return { x: v.x, y: v.y };
   }
 
-  restartRun(): void {
-    const poses = spawnPoses(this.level.start);
-    this.car.chassis.setTranslation(poses.chassis, true);
-    this.car.chassis.setRotation(this.level.start.angle, true);
-    this.car.chassis.setLinvel({ x: 0, y: 0 }, true);
-    this.car.chassis.setAngvel(0, true);
-    this.car.wheels.forEach((w, i) => {
+  respawnCar(): void {
+    const poses = spawnPoses(this.level.start, this.kind);
+    this.vehicle.chassis.setTranslation(poses.chassis, true);
+    this.vehicle.chassis.setRotation(this.level.start.angle, true);
+    this.vehicle.chassis.setLinvel({ x: 0, y: 0 }, true);
+    this.vehicle.chassis.setAngvel(0, true);
+    this.vehicle.wheels.forEach((w, i) => {
       w.setTranslation(poses.wheels[i], true);
       w.setRotation(0, true);
       w.setLinvel({ x: 0, y: 0 }, true);
       w.setAngvel(0, true);
     });
+  }
+
+  restartRun(): void {
+    this.respawnCar();
     this.finished = false;
   }
 
@@ -1276,12 +1378,12 @@ export class SimWorld {
 
 - [ ] **Step 5: Run tests to verify pass**
 
-Run: `npx vitest run src/sim/world.test.ts` — Expected: PASS (5 tests). If "drives forward" fails with the car moving in -x, flip the motor sign in `applyCarInput` (see domain notes) and re-run.
+Run: `npx vitest run src/sim/world.test.ts` — Expected: PASS (6 tests). If "drives forward" fails with the car moving in -x, flip the motor sign in `applyVehicleInput` (see domain notes) and re-run.
 
 - [ ] **Step 6: Typecheck and commit**
 
 ```bash
-npm run typecheck && git add src/sim && git commit -m "feat: Rapier SimWorld with drivable car, finish sensor, respawn"
+npm run typecheck && git add src/sim && git commit -m "feat: Rapier SimWorld with car/motorcycle/plane vehicles, finish sensor, respawn"
 ```
 
 ---
@@ -1402,31 +1504,138 @@ git add src/sim && git commit -m "test: verify boost, trampoline cooldowns and p
 
 ---
 
-### Task 9: Rendering — scene, level meshes, car mesh
+### Task 8B: Vehicle behavior differentiation
+
+Proves the three vehicles genuinely feel different. The behavior *code* landed in Task 7 (`VEHICLE_SPECS`, `applyVehicleInput`); this task pins the differences down with tests and tunes constants if needed.
 
 **Files:**
-- Create: `src/render/scene.ts`, `src/render/levelMeshes.ts`, `src/render/carMesh.ts`
+- Create: `src/sim/vehicleBehavior.test.ts`
+- Modify (only if a test exposes a tuning problem): `VEHICLE_SPECS` in `src/sim/vehicles.ts`
+
+**Interfaces:**
+- Consumes: `SimWorld`, `initRapier` from `./world`.
+- Produces: verified vehicle behavior; no new exports.
+
+- [ ] **Step 1: Write the tests** — `src/sim/vehicleBehavior.test.ts`
+
+```ts
+import { beforeAll, describe, expect, it } from 'vitest';
+import { SimWorld, initRapier } from './world';
+import { emptyLevel } from '../level/types';
+import type { LevelData } from '../level/types';
+
+const GAS = { gas: true, brake: false };
+const NONE = { gas: false, brake: false };
+
+function runway(): LevelData {
+  const l = emptyLevel();
+  l.strokes.push({ points: [[-50, 0], [400, 0]] });
+  l.start = { x: 0, y: 0.5, angle: 0 };
+  l.finish = { x: 390, y: 1 };
+  return l;
+}
+
+beforeAll(async () => {
+  await initRapier();
+});
+
+async function distanceAfterGas(kind: 'car' | 'motorcycle', steps: number): Promise<number> {
+  const w = await SimWorld.create(runway(), kind);
+  for (let i = 0; i < steps; i++) w.step(GAS);
+  const x = w.carPose().x;
+  w.free();
+  return x;
+}
+
+describe('vehicle differentiation', () => {
+  it('motorcycle out-accelerates the car by >= 1.3x over 1.5s', async () => {
+    const carX = await distanceAfterGas('car', 90);
+    const motoX = await distanceAfterGas('motorcycle', 90);
+    expect(carX).toBeGreaterThan(1); // sanity: both actually move
+    expect(motoX).toBeGreaterThan(carX * 1.3);
+  });
+
+  it('plane takes off from a flat runway under sustained gas', async () => {
+    const w = await SimWorld.create(runway(), 'plane');
+    let maxY = 0;
+    for (let i = 0; i < 360; i++) {
+      w.step(GAS); // 6 seconds full throttle
+      maxY = Math.max(maxY, w.carPose().y);
+    }
+    expect(maxY).toBeGreaterThan(4); // clearly airborne, not just suspension bounce
+    w.free();
+  });
+
+  it('plane glides when the engine cuts at altitude', async () => {
+    const w = await SimWorld.create(runway(), 'plane');
+    for (let i = 0; i < 360; i++) w.step(GAS); // get up to speed and altitude
+    const before = w.carPose();
+    expect(before.y).toBeGreaterThan(2); // must be airborne for the glide to mean anything
+    for (let i = 0; i < 90; i++) w.step(NONE); // 1.5s, engine off, no input
+    const after = w.carPose();
+    const dx = after.x - before.x;
+    const dy = after.y - before.y;
+    expect(dx).toBeGreaterThan(8); // still moving forward briskly
+    expect(dx / Math.max(1, -dy)).toBeGreaterThan(1.5); // glide ratio: shallow descent (or still climbing)
+    w.free();
+  });
+
+  it('car does not take off on a flat runway (no accidental aero)', async () => {
+    const w = await SimWorld.create(runway(), 'car');
+    let maxY = 0;
+    for (let i = 0; i < 360; i++) {
+      w.step(GAS);
+      maxY = Math.max(maxY, w.carPose().y);
+    }
+    expect(maxY).toBeLessThan(3);
+    w.free();
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests**
+
+Run: `npx vitest run src/sim/vehicleBehavior.test.ts`
+Expected: PASS. These tests are tuning gates, not logic gates — if one fails, adjust `VEHICLE_SPECS` in `vehicles.ts` per the guidance in Task 7's domain notes (motorcycle: raise `motorSpeed` or lower densities; plane takeoff: raise `liftCoef` or `thrust`; plane loops/tumbles: raise `angularDamping` or lower `liftCoef`; glide too steep: lower `dragCoef` or raise `liftCoef`). After ANY spec change, re-run `src/sim/world.test.ts` and `src/sim/gadgets.test.ts` too.
+
+- [ ] **Step 3: Run the full suite**
+
+Run: `npm test` — Expected: all tests pass.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/sim && git commit -m "test: vehicle differentiation - motorcycle accel, plane takeoff and glide"
+```
+
+---
+
+### Task 9: Rendering — scene, level meshes, vehicle meshes
+
+**Files:**
+- Create: `src/render/scene.ts`, `src/render/levelMeshes.ts`, `src/render/vehicleMesh.ts`
 - Test: `src/render/levelMeshes.test.ts`
 
 **Interfaces:**
-- Consumes: `LevelData`; `paddlePose`; tuning constants.
+- Consumes: `LevelData`; `paddlePose`; `VEHICLE_SPECS`, `VehicleKind` from `../sim/vehicles`; tuning constants.
 - Produces (used by Game/main in Task 12):
   - `createScene(canvas: HTMLCanvasElement): SceneCtx` where `SceneCtx = { renderer: THREE.WebGLRenderer; scene: THREE.Scene; editCam: THREE.OrthographicCamera; playCam: THREE.PerspectiveCamera; resize(): void }`
   - `updatePlayCamera(cam: THREE.PerspectiveCamera, car: { x: number; y: number }): void`
   - `buildLevelGroup(level: LevelData): THREE.Group` — children carry `userData.kind` in `'stroke' | 'boost' | 'trampoline' | 'paddle' | 'start' | 'finish'`; paddle meshes are named `paddle-0`, `paddle-1`, …
   - `buildStrokePreview(points: Vec2[]): THREE.Group` — thin segments for the in-progress stroke.
-  - `buildCarMesh(): THREE.Group` — children named `chassis`, `wheel-0`, `wheel-1`.
-  - `syncCarMesh(group: THREE.Group, pose: {x,y,angle}, wheelPoses: {x,y,angle}[]): void`
+  - `buildVehicleMesh(kind: VehicleKind): THREE.Group` — children named `chassis`, `wheel-0`, `wheel-1`; per-kind shapes sized from `VEHICLE_SPECS`.
+  - `syncVehicleMesh(group: THREE.Group, pose: {x,y,angle}, wheelPoses: {x,y,angle}[]): void`
 
-Only `levelMeshes.ts` gets unit tests (geometry counts run fine in Node). `scene.ts` needs WebGL, so it is verified by the e2e script in Task 13.
+Only `levelMeshes.ts`/`vehicleMesh.ts` get unit tests (geometry building runs fine in Node). `scene.ts` needs WebGL, so it is verified by the e2e script in Task 13.
 
 - [ ] **Step 1: Write failing tests** — `src/render/levelMeshes.test.ts`
 
 ```ts
 import { describe, expect, it } from 'vitest';
-import { buildCarMesh, syncCarMesh } from './carMesh';
+import { buildVehicleMesh, syncVehicleMesh } from './vehicleMesh';
 import { buildLevelGroup } from './levelMeshes';
 import { emptyLevel } from '../level/types';
+import { VEHICLE_KINDS } from '../sim/vehicles';
 
 function kinds(g: { children: { userData: Record<string, unknown> }[] }): Record<string, number> {
   const out: Record<string, number> = {};
@@ -1472,14 +1681,19 @@ describe('buildLevelGroup', () => {
   });
 });
 
-describe('car mesh', () => {
-  it('has named parts and syncs poses', () => {
-    const g = buildCarMesh();
-    const chassis = g.getObjectByName('chassis');
-    const w0 = g.getObjectByName('wheel-0');
-    const w1 = g.getObjectByName('wheel-1');
-    expect(chassis && w0 && w1).toBeTruthy();
-    syncCarMesh(
+describe('vehicle mesh', () => {
+  it('every kind has named parts', () => {
+    for (const kind of VEHICLE_KINDS) {
+      const g = buildVehicleMesh(kind);
+      expect(g.getObjectByName('chassis'), kind).toBeDefined();
+      expect(g.getObjectByName('wheel-0'), kind).toBeDefined();
+      expect(g.getObjectByName('wheel-1'), kind).toBeDefined();
+    }
+  });
+
+  it('syncs poses onto the named parts', () => {
+    const g = buildVehicleMesh('car');
+    syncVehicleMesh(
       g,
       { x: 5, y: 2, angle: 0.3 },
       [
@@ -1487,10 +1701,10 @@ describe('car mesh', () => {
         { x: 5.7, y: 1.6, angle: 1 },
       ],
     );
-    expect(chassis?.position.x).toBe(5);
-    expect(chassis?.rotation.z).toBeCloseTo(0.3);
-    expect(w0?.position.x).toBeCloseTo(4.3);
-    expect(w1?.position.y).toBeCloseTo(1.6);
+    expect(g.getObjectByName('chassis')?.position.x).toBe(5);
+    expect(g.getObjectByName('chassis')?.rotation.z).toBeCloseTo(0.3);
+    expect(g.getObjectByName('wheel-0')?.position.x).toBeCloseTo(4.3);
+    expect(g.getObjectByName('wheel-1')?.position.y).toBeCloseTo(1.6);
   });
 });
 ```
@@ -1589,29 +1803,47 @@ export function buildStrokePreview(points: Vec2[]): THREE.Group {
 }
 ```
 
-- [ ] **Step 4: Implement src/render/carMesh.ts**
+- [ ] **Step 4: Implement src/render/vehicleMesh.ts**
 
 ```ts
 import * as THREE from 'three';
-import * as T from '../sim/tuning';
+import { VEHICLE_SPECS, type VehicleKind } from '../sim/vehicles';
 
-const chassisMat = new THREE.MeshStandardMaterial({ color: 0x3b82f6 });
-const cabinMat = new THREE.MeshStandardMaterial({ color: 0xbfdbfe });
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0x3b82f6 });
+const accentMat = new THREE.MeshStandardMaterial({ color: 0xbfdbfe });
 const wheelMat = new THREE.MeshStandardMaterial({ color: 0x1f2430 });
+const wingMat = new THREE.MeshStandardMaterial({ color: 0xd1d5db });
 
-export function buildCarMesh(): THREE.Group {
+export function buildVehicleMesh(kind: VehicleKind): THREE.Group {
+  const spec = VEHICLE_SPECS[kind];
   const g = new THREE.Group();
   const chassis = new THREE.Group();
   chassis.name = 'chassis';
-  const body = new THREE.Mesh(new THREE.BoxGeometry(T.CHASSIS_HX * 2, T.CHASSIS_HY * 2, 1.2), chassisMat);
-  chassis.add(body);
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(T.CHASSIS_HX, 0.45, 1.0), cabinMat);
-  cabin.position.set(-0.1, T.CHASSIS_HY + 0.22, 0);
-  chassis.add(cabin);
+
+  if (kind === 'car') {
+    chassis.add(new THREE.Mesh(new THREE.BoxGeometry(spec.chassisHx * 2, spec.chassisHy * 2, 1.2), bodyMat));
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(spec.chassisHx, 0.45, 1.0), accentMat);
+    cabin.position.set(-0.1, spec.chassisHy + 0.22, 0);
+    chassis.add(cabin);
+  } else if (kind === 'motorcycle') {
+    chassis.add(new THREE.Mesh(new THREE.BoxGeometry(spec.chassisHx * 2, spec.chassisHy * 2, 0.4), bodyMat));
+    const rider = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.6, 0.35), accentMat);
+    rider.position.set(0, spec.chassisHy + 0.35, 0);
+    chassis.add(rider);
+  } else {
+    chassis.add(new THREE.Mesh(new THREE.BoxGeometry(spec.chassisHx * 2, spec.chassisHy * 2, 0.5), bodyMat)); // fuselage
+    const wing = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.1, 3.4), wingMat);
+    wing.position.set(0.1, 0.05, 0);
+    chassis.add(wing);
+    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.55, 0.1), wingMat);
+    tail.position.set(-spec.chassisHx + 0.2, spec.chassisHy + 0.2, 0);
+    chassis.add(tail);
+  }
   g.add(chassis);
+
   for (let i = 0; i < 2; i++) {
     const wheel = new THREE.Mesh(
-      new THREE.CylinderGeometry(T.WHEEL_RADIUS, T.WHEEL_RADIUS, 0.35, 18),
+      new THREE.CylinderGeometry(spec.wheelRadius, spec.wheelRadius, kind === 'motorcycle' ? 0.22 : 0.35, 18),
       wheelMat,
     );
     wheel.geometry.rotateX(Math.PI / 2); // cylinder axis along z
@@ -1621,7 +1853,7 @@ export function buildCarMesh(): THREE.Group {
   return g;
 }
 
-export function syncCarMesh(
+export function syncVehicleMesh(
   group: THREE.Group,
   pose: { x: number; y: number; angle: number },
   wheelPoses: { x: number; y: number; angle: number }[],
@@ -1711,12 +1943,12 @@ export function updatePlayCamera(cam: THREE.PerspectiveCamera, car: { x: number;
 
 - [ ] **Step 6: Run tests + typecheck**
 
-Run: `npx vitest run src/render/levelMeshes.test.ts && npm run typecheck` — Expected: PASS (4 tests), clean typecheck.
+Run: `npx vitest run src/render/levelMeshes.test.ts && npm run typecheck` — Expected: PASS (5 tests), clean typecheck.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/render && git commit -m "feat: scene, extruded level meshes, car mesh"
+git add src/render && git commit -m "feat: scene, extruded level meshes, per-kind vehicle meshes"
 ```
 
 ---
@@ -2299,7 +2531,7 @@ export function createHud(host: HTMLElement, cb: HudCallbacks): Hud {
       hint.textContent =
         m === 'edit'
           ? 'Draw with the mouse · Space-drag to pan · wheel to zoom · Tab to play'
-          : 'W/→ gas · S/← brake · R restart · Tab to edit';
+          : 'W/→ gas · S/← brake · A/D tilt · R restart · Tab to edit';
       if (m === 'edit') hud.hideResults();
     },
     setTool(t) {
@@ -2374,6 +2606,7 @@ git add src/editor src/ui && git commit -m "feat: editor DOM controls (pan/zoom/
 
 **Files:**
 - Create: `src/game.ts`, `src/level/demoLevel.ts`, rewrite `src/main.ts`
+- Modify: `src/ui/hud.ts` (add the vehicle picker — see the note after Step 6)
 - Test: `src/level/demoLevel.test.ts`
 
 **Interfaces:**
@@ -2381,7 +2614,7 @@ git add src/editor src/ui && git commit -m "feat: editor DOM controls (pan/zoom/
 - Produces:
   - `demoLevel(): LevelData`
   - `class Game` (see code) — owned by `main.ts`.
-  - `window.__game = { getState(), getLevel(), loadLevel(json), setMode(m), setInput(i), getCarPose(), getCarVelocity(), getRunState() }` — `setMode` returns a Promise; `loadLevel` returns boolean.
+  - `window.__game = { getState(), getLevel(), loadLevel(json), setMode(m), setInput(i), setVehicle(kind), getVehicle(), getCarPose(), getCarVelocity(), getRunState() }` — `setMode` returns a Promise; `loadLevel`/`setVehicle` return booleans (`setVehicle` is edit-mode only and returns false during play).
 
 - [ ] **Step 1: Write failing test** — `src/level/demoLevel.test.ts`
 
@@ -2443,8 +2676,9 @@ import { advance } from './game/loop';
 import { type LevelData, cloneLevel } from './level/types';
 import { type Input, type RunState, createRun, finishRun, killY, tickRun } from './sim/run';
 import * as T from './sim/tuning';
+import type { VehicleKind } from './sim/vehicles';
 import { SimWorld } from './sim/world';
-import { buildCarMesh, syncCarMesh } from './render/carMesh';
+import { buildVehicleMesh, syncVehicleMesh } from './render/vehicleMesh';
 import { buildLevelGroup, buildStrokePreview } from './render/levelMeshes';
 import { type SceneCtx, updatePlayCamera } from './render/scene';
 
@@ -2463,12 +2697,13 @@ export class Game {
   input: Input = { gas: false, brake: false };
   run: RunState = createRun();
   sim: SimWorld | null = null;
+  vehicleKind: VehicleKind = 'car';
 
   private ctx: SceneCtx;
   private events: GameEvents;
   private levelGroup: THREE.Group;
   private previewGroup: THREE.Group | null = null;
-  private carGroup: THREE.Group;
+  private vehicleGroup: THREE.Group;
   private accS = 0;
   private lastMs: number | null = null;
   private switching = false;
@@ -2479,9 +2714,9 @@ export class Game {
     this.events = events;
     this.levelGroup = buildLevelGroup(level);
     this.ctx.scene.add(this.levelGroup);
-    this.carGroup = buildCarMesh();
-    this.carGroup.visible = false;
-    this.ctx.scene.add(this.carGroup);
+    this.vehicleGroup = buildVehicleMesh(this.vehicleKind);
+    this.vehicleGroup.visible = false;
+    this.ctx.scene.add(this.vehicleGroup);
   }
 
   get level(): LevelData {
@@ -2493,6 +2728,16 @@ export class Game {
     this.editor.consumeChanged();
     this.rebuildMeshes();
     this.events.onLevelEdited(this.level);
+  }
+
+  setVehicle(kind: VehicleKind): boolean {
+    if (this.mode !== 'edit') return false;
+    this.vehicleKind = kind;
+    this.ctx.scene.remove(this.vehicleGroup);
+    this.vehicleGroup = buildVehicleMesh(kind);
+    this.vehicleGroup.visible = false;
+    this.ctx.scene.add(this.vehicleGroup);
+    return true;
   }
 
   rebuildMeshes(): void {
@@ -2510,16 +2755,16 @@ export class Game {
     this.switching = true;
     try {
       if (mode === 'play') {
-        this.sim = await SimWorld.create(this.level);
+        this.sim = await SimWorld.create(this.level, this.vehicleKind);
         this.run = createRun();
         this.accS = 0;
-        this.carGroup.visible = true;
+        this.vehicleGroup.visible = true;
         const p = this.sim.carPose();
         this.ctx.playCam.position.set(p.x - 4, p.y + 3.2, 13);
       } else {
         this.sim?.free();
         this.sim = null;
-        this.carGroup.visible = false;
+        this.vehicleGroup.visible = false;
         this.run = createRun();
       }
       this.mode = mode;
@@ -2555,7 +2800,7 @@ export class Game {
         if (this.sim.carPose().y < killY(this.level)) this.sim.respawnCar();
       }
       const pose = this.sim.carPose();
-      syncCarMesh(this.carGroup, pose, this.sim.wheelPoses());
+      syncVehicleMesh(this.vehicleGroup, pose, this.sim.wheelPoses());
       this.sim.paddlePoses().forEach((pp, i) => {
         const m = this.levelGroup.getObjectByName(`paddle-${i}`);
         if (m) {
@@ -2573,16 +2818,6 @@ export class Game {
 }
 ```
 
-Note: `respawnCar` — Task 7 named this behavior inside `restartRun`, which ALSO clears `finished`. Falling off mid-run must NOT clear a legitimate finish that hasn't been consumed, but by construction the car can't both finish and fall in the same step; still, add a dedicated method to `SimWorld` (one-line addition to Task 7's file):
-
-```ts
-respawnCar(): void {
-  const finished = this.finished;
-  this.restartRun();
-  this.finished = finished;
-}
-```
-
 - [ ] **Step 6: Rewrite src/main.ts**
 
 ```ts
@@ -2590,9 +2825,11 @@ import { createScene } from './render/scene';
 import { Game } from './game';
 import { createHud } from './ui/hud';
 import type { Tool } from './editor/core';
+import { attachEditorControls } from './editor/dom';
 import { demoLevel } from './level/demoLevel';
 import { type LevelData, validateLevel } from './level/types';
 import * as store from './level/store';
+import type { VehicleKind } from './sim/vehicles';
 import { initRapier } from './sim/world';
 import type { RunState } from './sim/run';
 
@@ -2603,7 +2840,9 @@ declare global {
       getLevel(): LevelData;
       loadLevel(json: unknown): boolean;
       setMode(m: 'edit' | 'play'): Promise<void>;
-      setInput(i: { gas?: boolean; brake?: boolean }): void;
+      setInput(i: { gas?: boolean; brake?: boolean; tiltBack?: boolean; tiltFwd?: boolean }): void;
+      setVehicle(kind: VehicleKind): boolean;
+      getVehicle(): VehicleKind;
       getCarPose(): { x: number; y: number; angle: number } | null;
       getCarVelocity(): { x: number; y: number } | null;
       getRunState(): RunState;
@@ -2632,6 +2871,10 @@ async function boot(): Promise<void> {
   const initial = store.loadAutosave() ?? demoLevel();
   let currentName = 'demo';
   let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleAutosave = (level: LevelData) => {
+    if (autosaveTimer) clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(() => store.saveAutosave(level), 400);
+  };
 
   const game = new Game(initial, ctx, {
     onModeChange: (m) => hud.setMode(m),
@@ -2641,16 +2884,16 @@ async function boot(): Promise<void> {
       hud.showResults(run.timeMs, best);
       store.setBestTime(currentName, run.timeMs);
     },
-    onLevelEdited: (level) => {
-      if (autosaveTimer) clearTimeout(autosaveTimer);
-      autosaveTimer = setTimeout(() => store.saveAutosave(level), 400);
-    },
+    onLevelEdited: (level) => scheduleAutosave(level),
   });
 
   const hud = createHud(uiHost, {
     onSelectTool: (t: Tool) => {
       game.editor.tool = t;
       hud.setTool(t);
+    },
+    onSelectVehicle: (k: VehicleKind) => {
+      if (game.setVehicle(k)) hud.setVehicle(k);
     },
     onTogglePlay: () => void game.setMode(game.mode === 'edit' ? 'play' : 'edit'),
     onRestart: () => {
@@ -2686,12 +2929,9 @@ async function boot(): Promise<void> {
 
   const onEdited = () => {
     game.rebuildMeshes();
-    game['events' as never]; // (no-op) — autosave goes through onLevelEdited:
-    if (autosaveTimer) clearTimeout(autosaveTimer);
-    autosaveTimer = setTimeout(() => store.saveAutosave(game.level), 400);
+    scheduleAutosave(game.level);
   };
 
-  const { attachEditorControls } = await import('./editor/dom');
   attachEditorControls(canvas, ctx.editCam, game.editor, {
     enabled: () => game.mode === 'edit',
     onEdit: onEdited,
@@ -2699,6 +2939,7 @@ async function boot(): Promise<void> {
 
   hud.setMode('edit');
   hud.setTool('draw');
+  hud.setVehicle('car');
   hud.setLevelList(store.listLevels());
   hud.setTimer(null);
 
@@ -2715,6 +2956,8 @@ async function boot(): Promise<void> {
     if (game.mode === 'play') {
       if (e.code === 'KeyW' || e.code === 'ArrowRight') game.input.gas = true;
       if (e.code === 'KeyS' || e.code === 'ArrowLeft') game.input.brake = true;
+      if (e.code === 'KeyA') game.input.tiltBack = true;
+      if (e.code === 'KeyD') game.input.tiltFwd = true;
       if (e.code === 'KeyR') {
         hud.hideResults();
         game.restart();
@@ -2727,6 +2970,8 @@ async function boot(): Promise<void> {
   window.addEventListener('keyup', (e) => {
     if (e.code === 'KeyW' || e.code === 'ArrowRight') game.input.gas = false;
     if (e.code === 'KeyS' || e.code === 'ArrowLeft') game.input.brake = false;
+    if (e.code === 'KeyA') game.input.tiltBack = false;
+    if (e.code === 'KeyD') game.input.tiltFwd = false;
   });
 
   window.__game = {
@@ -2740,10 +2985,16 @@ async function boot(): Promise<void> {
     },
     setMode: (m) => game.setMode(m),
     setInput: (i) => {
-      game.input = { gas: !!i.gas, brake: !!i.brake };
+      game.input = { gas: !!i.gas, brake: !!i.brake, tiltBack: !!i.tiltBack, tiltFwd: !!i.tiltFwd };
     },
-    getCarPose: () => game.sim?.carPose() ?? null,
-    getCarVelocity: () => game.sim?.carVelocity() ?? null,
+    setVehicle: (k) => {
+      const ok = game.setVehicle(k);
+      if (ok) hud.setVehicle(k);
+      return ok;
+    },
+    getVehicle: () => game.vehicleKind,
+    getCarPose: () => (game.sim ? game.sim.carPose() : null),
+    getCarVelocity: () => (game.sim ? game.sim.carVelocity() : null),
     getRunState: () => game.run,
   };
 
@@ -2757,18 +3008,21 @@ async function boot(): Promise<void> {
 void boot();
 ```
 
-Remove the stray `game['events' as never];` line — the autosave logic that follows it is the real body. (It is shown here only to flag that `onEdited` must both rebuild meshes and debounce-autosave.)
+Also extend the HUD from Task 11 with the vehicle picker (small addition to `src/ui/hud.ts`):
+- Add to `HudCallbacks`: `onSelectVehicle(k: VehicleKind): void` (import `VehicleKind`, `VEHICLE_KINDS` from `../sim/vehicles`).
+- Add to `Hud`: `setVehicle(k: VehicleKind): void`.
+- In `createHud`, after the tool buttons, add one button per vehicle — labels `🚗`, `🏍️`, `✈️` in `VEHICLE_KINDS` order, `title` = kind name — wired to `cb.onSelectVehicle(kind)`; keep them in a `Map<VehicleKind, HTMLButtonElement>` and implement `setVehicle` like `setTool` (toggle `active` class). Vehicle buttons stay ENABLED in play mode? No — disable them in play mode along with the tool buttons (`setMode` already loops `toolButtons`; loop the vehicle buttons there too).
 
 - [ ] **Step 7: Typecheck, full suite, manual smoke**
 
 Run: `npm run typecheck && npm test && npm run build`
 Expected: all clean.
-Then: `npm run dev` briefly, open the printed URL — you should see the demo level, be able to draw, hit Tab, and drive. (Screenshot check happens properly in Task 13.)
+Then: `npm run dev` briefly, open the printed URL — you should see the demo level, be able to draw, pick 🏍️, hit Tab, and feel the quicker acceleration. (Automated verification happens in Task 13.)
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add -A && git commit -m "feat: Game orchestration, HUD wiring, demo level, __game debug handle"
+git add -A && git commit -m "feat: Game orchestration, HUD wiring, vehicle picker, demo level, __game handle"
 ```
 
 ---
@@ -2857,29 +3111,44 @@ try {
   await waitFor(page, () => Boolean(window.__game), 20000, '__game handle');
   pass('app booted, __game available');
 
-  // Scenario 1: drive a flat level to the finish
-  await page.evaluate((lvl) => window.__game.loadLevel(lvl), flatLevel);
-  await page.evaluate(() => window.__game.setMode('play'));
-  await waitFor(page, () => window.__game.getState().mode === 'play', 10000, 'play mode');
-  await page.evaluate(() => window.__game.setInput({ gas: true }));
-  await waitFor(page, () => window.__game.getRunState().phase === 'finished', 25000, 'finish');
-  const time = await page.evaluate(() => window.__game.getRunState().timeMs);
-  if (time > 0) pass(`car reached finish in ${(time / 1000).toFixed(2)}s`);
-  else fail('finished with zero time');
+  // Runs the flat course with a given vehicle and returns the finish time (sim ms).
+  const timeFor = async (kind) => {
+    await page.evaluate(() => window.__game.setInput({}));
+    await page.evaluate(() => window.__game.setMode('edit'));
+    await page.evaluate((lvl) => window.__game.loadLevel(lvl), flatLevel);
+    await page.evaluate((k) => window.__game.setVehicle(k), kind);
+    await page.evaluate(() => window.__game.setMode('play'));
+    await waitFor(page, () => window.__game.getState().mode === 'play', 10000, `play mode (${kind})`);
+    await page.evaluate(() => window.__game.setInput({ gas: true }));
+    await waitFor(page, () => window.__game.getRunState().phase === 'finished', 25000, `${kind} finish`);
+    await page.evaluate(() => window.__game.setInput({}));
+    return page.evaluate(() => window.__game.getRunState().timeMs);
+  };
+
+  // Scenario 1: car drives the flat level to the finish
+  const carTime = await timeFor('car');
+  if (carTime > 0) pass(`car reached finish in ${(carTime / 1000).toFixed(2)}s`);
+  else fail('car finished with zero time');
   const overlayVisible = await page.evaluate(
     () => !document.querySelector('.overlay')?.classList.contains('hidden'),
   );
   overlayVisible ? pass('results overlay shown') : fail('results overlay not shown');
 
   // Scenario 2: boost pad accelerates a coasting car
-  await page.evaluate(() => window.__game.setInput({}));
   await page.evaluate(() => window.__game.setMode('edit'));
   await page.evaluate((lvl) => window.__game.loadLevel(lvl), boostLevel);
+  await page.evaluate(() => window.__game.setVehicle('car'));
   await page.evaluate(() => window.__game.setMode('play'));
   await waitFor(page, () => window.__game.getState().mode === 'play', 10000, 'play mode (boost)');
   await new Promise((r) => setTimeout(r, 2000)); // coast — no input at all
   const vx = await page.evaluate(() => window.__game.getCarVelocity()?.x ?? 0);
   vx > 3 ? pass(`boost accelerated coasting car to vx=${vx.toFixed(2)}`) : fail(`boost too weak: vx=${vx.toFixed(2)}`);
+
+  // Scenario 3: motorcycle beats the car on the same course (sim-time comparison)
+  const motoTime = await timeFor('motorcycle');
+  motoTime < carTime
+    ? pass(`motorcycle (${(motoTime / 1000).toFixed(2)}s) beat car (${(carTime / 1000).toFixed(2)}s)`)
+    : fail(`motorcycle (${motoTime}ms) did not beat car (${carTime}ms)`);
 
   await page.screenshot({ path: 'e2e/last-run.png' });
   await browser.close();
@@ -2905,7 +3174,7 @@ Expected: `ALL PASS`, exit 0. Debug any failure before proceeding — this is th
 ```markdown
 # Sketch Racer
 
-Sketch a 2D side-view level, then drive a physics car through it — rendered in simple 3D.
+Sketch a 2D side-view level, then drive a physics vehicle through it — rendered in simple 3D.
 
 ## Run
 
@@ -2915,14 +3184,18 @@ npm run dev
 ## Controls
 
 **Edit mode:** draw with the mouse; tools 1–7 (draw, boost, trampoline, paddle, start, finish, erase);
-Space-drag pan; wheel zoom; ↶/↷ undo/redo; 💾 save/load levels (localStorage). Tab or ▶ to play.
+pick a vehicle (🚗 car · 🏍️ motorcycle · ✈️ plane); Space-drag pan; wheel zoom; ↶/↷ undo/redo;
+💾 save/load levels (localStorage). Tab or ▶ to play.
 
-**Play mode:** W/→ gas · S/← brake/reverse (also air-tilt) · R restart · Tab back to edit.
+**Play mode:** W/→ gas · S/← brake/reverse · A/D tilt (always active for the plane) · R restart · Tab back to edit.
+
+**Vehicles:** the car is the balanced baseline; the motorcycle is light and accelerates hard;
+the plane takes off at speed and glides (gas = thrust, A/D = pitch).
 
 ## Verify
 
 npm test        # unit tests (Vitest)
-npm run verify  # e2e: boots the app headless, drives a car to the finish (Playwright)
+npm run verify  # e2e: boots the app headless, races car vs motorcycle (Playwright)
 
 ## Architecture
 
@@ -2943,7 +3216,7 @@ git add -A && git commit -m "feat: e2e verify script and README"
 
 ## Completion checklist
 
-- `npm test` — all unit tests pass
+- `npm test` — all unit tests pass (including vehicle differentiation)
 - `npm run build` — clean typecheck + production build
-- `npm run verify` — e2e ALL PASS (drives to finish, boost works, overlay shows)
-- Manual: draw a level with every gadget, play it, save it, reload the page, load it back
+- `npm run verify` — e2e ALL PASS (car finishes, boost works, overlay shows, motorcycle beats car)
+- Manual: draw a level with every gadget, play it with each vehicle, save it, reload the page, load it back
