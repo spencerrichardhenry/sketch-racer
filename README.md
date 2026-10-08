@@ -2,6 +2,8 @@
 
 Sketch a side-view track in 2D, then drive it as a physics racer rendered in simple 3D.
 
+Play it at https://spencerrichardhenry.github.io/sketch-racer/ or open [Spencer's Arcade](https://spencerrichardhenry.github.io/) for the full collection.
+
 ## Run locally
 
 ```bash
@@ -50,6 +52,10 @@ npm run verify    # Chromium e2e: editor, race, landing, recovery, vehicles, scr
 ```
 
 If Chromium is not already installed, run `npx playwright install chromium` once before `npm run verify`.
+
+## Deployment
+
+Every push to `master` runs the tests, builds the game, and publishes `dist/` to GitHub Pages with `.github/workflows/deploy.yml`. Production builds use the `/sketch-racer/` base path.
 
 ## Architecture
 
